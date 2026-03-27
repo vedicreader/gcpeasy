@@ -1,0 +1,21 @@
+project:
+  type: website
+  output-dir: ../docs
+
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+    toc: true
+
+website:
+  title: "gcpeasy"
+  navbar:
+    background: primary
+    search: true
+    left:
+      - href: index.qmd
+        text: Home
+    right:
+      - icon: github
+        href: https://github.com/vedicreader/gcpeasy
