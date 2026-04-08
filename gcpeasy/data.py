@@ -4,20 +4,23 @@
 
 # %% auto #0
 __all__ = ['create_bucket', 'bucket_url', 'signed_url', 'bucket_conn', 'create_collection', 'firestore_conn', 'create_postgres',
-           'postgres_conn', 'create_redis', 'redis_conn']
+           'postgres_conn', 'create_redis', 'redis_conn', 'create_topic', 'create_subscription']
 
-# %% ../nbs/02_data.ipynb #cbe5e792
+# %% ../nbs/02_data.ipynb #482a2da9
 try:
     from google.cloud import storage
     from google.cloud import firestore as fs
     from google.cloud.sql.connector import Connector as SQLConnector
     from google.cloud import redis_v1 as redis_client
     from google.cloud.redis_v1 import CloudRedisClient, Instance
+    from google.cloud import pubsub_v1
     import googleapiclient.discovery
+    from google.api_core.exceptions import NotFound, AlreadyExists
 except ImportError:
     pass
 
-# %% ../nbs/02_data.ipynb #55926af2
+
+# %% ../nbs/02_data.ipynb #32ad64fa
 def _gcs(auth):
     return storage.Client(project=auth.project, credentials=auth.credentials)
 
@@ -28,14 +31,18 @@ def create_bucket(
     location: str = None,
     versioning: bool = True,
     labels: dict = None,
+    kms_key_name: str = None,
     **compliance_opts,
 ) -> dict:
-    """Create or update a GCS bucket with uniform access, versioning, and encryption."""
+    """Create or update a GCS bucket with uniform access, versioning, and encryption.
+
+    Pass `kms_key_name` for a Customer-Managed Encryption Key (CMEK).
+    """
     client = _gcs(auth)
     location = location or auth.region
     try:
         bucket = client.get_bucket(name)
-    except Exception:
+    except NotFound:
         bucket = client.bucket(name)
         bucket.location = location
         bucket = client.create_bucket(bucket)
@@ -45,6 +52,8 @@ def create_bucket(
         bucket.versioning_enabled = True
     if labels:
         bucket.labels = labels
+    if kms_key_name:
+        bucket.default_kms_key_name = kms_key_name
     bucket.patch()
     return {'name': bucket.name, 'location': bucket.location, 'url': f'gs://{bucket.name}'}
 
@@ -55,22 +64,39 @@ def bucket_url(name: str, key: str = '') -> str:
 
 
 def signed_url(auth, name: str, key: str, hours: int = 1) -> str:
-    """Generate a signed URL for temporary object access."""
+    """Generate a V4 signed URL for temporary object access.
+
+    Requires service account credentials (`service_account_file=` or `impersonate_sa=`
+    in `GCPAuth`). Raises `RuntimeError` for plain ADC user credentials.
+    """
     import datetime
+    from google.auth.transport import requests as google_requests
+
+    creds = auth.credentials
+    if not creds.valid:
+        creds.refresh(google_requests.Request())
     client = _gcs(auth)
     blob = client.bucket(name).blob(key)
-    return blob.generate_signed_url(
-        expiration=datetime.timedelta(hours=hours),
-        method='GET',
-        credentials=auth.credentials,
-    )
+    try:
+        return blob.generate_signed_url(
+            expiration=datetime.timedelta(hours=hours),
+            method='GET',
+            version='v4',
+            credentials=creds,
+        )
+    except (AttributeError, ValueError) as e:
+        raise RuntimeError(
+            f'signed_url requires service account credentials: {e}. '
+            'Pass service_account_file= or impersonate_sa= to GCPAuth.'
+        ) from e
 
 
 def bucket_conn(name: str) -> str:
     "Return a gs:// connection URI for the bucket."
     return f'gs://{name}'
 
-# %% ../nbs/02_data.ipynb #5b343640
+
+# %% ../nbs/02_data.ipynb #44e2caa1
 def _firestore(auth):
     return fs.Client(project=auth.project, credentials=auth.credentials)
 
@@ -89,7 +115,7 @@ def firestore_conn(auth) -> str:
     "Return a firestore:// URI for the project database."
     return f'firestore://{auth.project}/(default)'
 
-# %% ../nbs/02_data.ipynb #920035fe
+# %% ../nbs/02_data.ipynb #f89ae7b4
 def create_postgres(
     auth,
     name: str,
@@ -99,6 +125,7 @@ def create_postgres(
     master_password: str = None,
     deletion_protection: bool = False,
     backup_retention: int = 7,
+    kms_key_name: str = None,
     labels: dict = None,
     **compliance_opts,
 ) -> dict:
@@ -106,6 +133,8 @@ def create_postgres(
 
     SSL is always required; at-rest encryption is GCP-default.
     Pass `deletion_protection=True` with HIPAA/compliance profiles.
+    `backup_retention` keeps that many automated backups (PITR window is capped at 7 days).
+    Pass `kms_key_name` for a Customer-Managed Encryption Key (CMEK).
     """
     import secrets as _sec
     sqladmin = googleapiclient.discovery.build(
@@ -121,12 +150,18 @@ def create_postgres(
             'ipConfiguration': {'requireSsl': True},
             'backupConfiguration': {
                 'enabled': True,
-                'transactionLogRetentionDays': backup_retention,
+                'transactionLogRetentionDays': min(backup_retention, 7),
+                'backupRetentionSettings': {
+                    'retainedBackups': backup_retention,
+                    'retentionUnit': 'COUNT',
+                },
             },
             'deletionProtectionEnabled': deletion_protection,
             'userLabels': labels or {},
         },
     }
+    if kms_key_name:
+        body['diskEncryptionConfiguration'] = {'kmsKeyName': kms_key_name}
     try:
         sqladmin.instances().get(
             project=auth.project, instance=name
@@ -143,11 +178,12 @@ def postgres_conn(auth, name: str, db: str = 'postgres') -> str:
     "Return a Cloud SQL connection string for use with cloud-sql-python-connector."
     return f'{auth.project}:{auth.region}:{name}'
 
-# %% ../nbs/02_data.ipynb #86614554
+
+# %% ../nbs/02_data.ipynb #fb07919a
 def create_redis(
     auth,
     name: str,
-    tier: str = 'BASIC',
+    tier: str = None,
     memory_size_gb: int = 1,
     redis_version: str = 'REDIS_7_0',
     transit_encryption: bool = True,
@@ -156,9 +192,13 @@ def create_redis(
 ) -> dict:
     """Create or update a Memorystore Redis instance.
 
-    In-transit encryption is enabled by default (`transit_encryption=True`).
-    At-rest encryption uses Google-managed keys by default.
+    Defaults to `STANDARD_HA` when `multi_region=True` or `backup_retention` is set in
+    compliance opts (e.g. HIPAA). Otherwise defaults to `BASIC`.
+    In-transit encryption is enabled by default.
     """
+    needs_ha = compliance_opts.get('multi_region') or compliance_opts.get('backup_retention')
+    tier = tier or ('STANDARD_HA' if needs_ha else 'BASIC')
+
     client = CloudRedisClient(credentials=auth.credentials)
     parent = f'projects/{auth.project}/locations/{auth.region}'
     instance_name = f'{parent}/instances/{name}'
@@ -166,7 +206,7 @@ def create_redis(
     try:
         existing = client.get_instance(name=instance_name)
         return {'name': existing.name, 'host': existing.host, 'port': existing.port}
-    except Exception:
+    except NotFound:
         pass
 
     instance = Instance(
@@ -193,3 +233,56 @@ def redis_conn(auth, name: str) -> str:
         name=f'projects/{auth.project}/locations/{auth.region}/instances/{name}'
     )
     return f'redis://{instance.host}:{instance.port}'
+
+
+# %% ../nbs/02_data.ipynb #546dab57
+def create_topic(
+    auth,
+    name: str,
+    kms_key_name: str = None,
+    labels: dict = None,
+    **_,
+) -> dict:
+    """Create or return a Pub/Sub topic. Pass `kms_key_name` for CMEK encryption."""
+    client = pubsub_v1.PublisherClient(credentials=auth.credentials)
+    topic_path = f'projects/{auth.project}/topics/{name}'
+    try:
+        existing = client.get_topic(request={'topic': topic_path})
+        return {'name': existing.name}
+    except NotFound:
+        pass
+    kwargs = {'name': topic_path, 'labels': labels or {}}
+    if kms_key_name:
+        kwargs['kms_key_name'] = kms_key_name
+    topic = client.create_topic(request=kwargs)
+    return {'name': topic.name}
+
+
+def create_subscription(
+    auth,
+    topic: str,
+    name: str,
+    ack_deadline: int = 60,
+    dead_letter_topic: str = None,
+    **_,
+) -> dict:
+    """Create or return a Pub/Sub subscription with optional dead-letter topic."""
+    client = pubsub_v1.SubscriberClient(credentials=auth.credentials)
+    sub_path = f'projects/{auth.project}/subscriptions/{name}'
+    topic_path = topic if '/' in topic else f'projects/{auth.project}/topics/{topic}'
+    try:
+        existing = client.get_subscription(request={'subscription': sub_path})
+        return {'name': existing.name}
+    except NotFound:
+        pass
+    req = {
+        'name': sub_path,
+        'topic': topic_path,
+        'ack_deadline_seconds': ack_deadline,
+    }
+    if dead_letter_topic:
+        dlq = dead_letter_topic if '/' in dead_letter_topic else f'projects/{auth.project}/topics/{dead_letter_topic}'
+        req['dead_letter_policy'] = {'dead_letter_topic': dlq, 'max_delivery_attempts': 5}
+    sub = client.create_subscription(request=req)
+    return {'name': sub.name}
+

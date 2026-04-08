@@ -4,19 +4,24 @@
 
 # %% auto #0
 __all__ = ['create_vpc', 'add_subnet', 'create_firewall_rule', 'create_secret', 'get_secret', 'update_secret', 'secret_name',
-           'create_service_account', 'bind_iam_role', 'sa_email', 'create_private_service_connect',
-           'create_cdn_backend', 'create_https_lb']
+           'create_service_account', 'bind_iam_role', 'sa_email', 'list_sa_keys', 'rotate_sa_key',
+           'create_private_service_connect', 'create_cdn_backend', 'create_managed_cert', 'create_https_lb',
+           'create_kms_key', 'enable_audit_logs', 'create_armor_policy']
 
-# %% ../nbs/04_network.ipynb #3254b5c9
+# %% ../nbs/04_network.ipynb #d32191af
 try:
     from google.cloud import compute_v1
     from google.cloud import secretmanager_v1
-    import google.oauth2.credentials
-    import googleapiclient.discovery
+    from google.cloud import iam_admin_v1
+    from google.cloud import resourcemanager_v3
+    from google.cloud import kms_v1
+    from google.iam.v1 import iam_policy_pb2, policy_pb2
+    from google.api_core.exceptions import NotFound, AlreadyExists
 except ImportError:
     pass
 
-# %% ../nbs/04_network.ipynb #b49b44d9
+
+# %% ../nbs/04_network.ipynb #7e019e4a
 def _compute(auth):
     return compute_v1.NetworksClient(credentials=auth.credentials)
 
@@ -32,7 +37,7 @@ def create_vpc(
     try:
         existing = client.get(project=auth.project, network=name)
         return {'name': name, 'self_link': existing.self_link}
-    except Exception:
+    except NotFound:
         pass
 
     network = compute_v1.Network(
@@ -54,23 +59,37 @@ def add_subnet(
     cidr: str = '10.0.0.0/24',
     region: str = None,
     private_google_access: bool = True,
+    enable_flow_logs: bool = True,
     **_,
 ) -> dict:
-    """Add a subnet to a VPC. `private_google_access=True` enables Private Google Access."""
+    """Add a subnet to a VPC.
+
+    `private_google_access=True` enables Private Google Access.
+    `enable_flow_logs=True` captures VPC Flow Logs for network observability (CC6.6, CC7.1).
+    """
     region = region or auth.region
     client = compute_v1.SubnetworksClient(credentials=auth.credentials)
     try:
         existing = client.get(project=auth.project, region=region, subnetwork=subnet_name)
         return {'name': subnet_name, 'cidr': existing.ip_cidr_range}
-    except Exception:
+    except NotFound:
         pass
 
+    log_config = (
+        compute_v1.SubnetworkLogConfig(
+            enable=True,
+            aggregation_interval=compute_v1.SubnetworkLogConfig.AggregationInterval.INTERVAL_5_SEC,
+            flow_sampling=0.5,
+            metadata=compute_v1.SubnetworkLogConfig.Metadata.INCLUDE_ALL_METADATA,
+        ) if enable_flow_logs else None
+    )
     subnet = compute_v1.Subnetwork(
         name=subnet_name,
         ip_cidr_range=cidr,
         region=region,
         network=f'projects/{auth.project}/global/networks/{network_name}',
         private_ip_google_access=private_google_access,
+        log_config=log_config,
     )
     op = client.insert(project=auth.project, region=region, subnetwork_resource=subnet)
     op.result(timeout=120)
@@ -88,12 +107,15 @@ def create_firewall_rule(
     target_tags: list = None,
     **_,
 ) -> dict:
-    """Create a firewall rule. Returns immediately if the rule already exists."""
+    """Create a firewall rule. Returns immediately if the rule already exists.
+
+    `source_ranges` must be provided explicitly — no implicit open-world default.
+    """
     client = compute_v1.FirewallsClient(credentials=auth.credentials)
     try:
         client.get(project=auth.project, firewall=name)
         return {'name': name}
-    except Exception:
+    except NotFound:
         pass
 
     allowed = compute_v1.Allowed(
@@ -105,14 +127,15 @@ def create_firewall_rule(
         network=f'projects/{auth.project}/global/networks/{network}',
         direction=direction,
         allowed=[allowed],
-        source_ranges=source_ranges or (['0.0.0.0/0'] if direction == 'INGRESS' else []),
+        source_ranges=source_ranges or [],
         target_tags=target_tags or [],
     )
     op = client.insert(project=auth.project, firewall_resource=rule)
     op.result(timeout=60)
     return {'name': name}
 
-# %% ../nbs/04_network.ipynb #81e24b74
+
+# %% ../nbs/04_network.ipynb #eac66321
 def _sm(auth):
     return secretmanager_v1.SecretManagerServiceClient(credentials=auth.credentials)
 
@@ -122,42 +145,64 @@ def create_secret(
     name: str,
     value: str,
     labels: dict = None,
+    kms_key_name: str = None,
+    rotation_period: str = None,
+    next_rotation_time: str = None,
     **_,
 ) -> dict:
-    """Create or update a Secret Manager secret. Adds a new version with `value`."""
+    """Create or update a Secret Manager secret. Adds a new version with `value`.
+
+    Pass `kms_key_name` for CMEK encryption.
+    Pass `rotation_period` (e.g. `'86400s'`) to set a rotation notification schedule.
+    """
     client = _sm(auth)
     parent = f'projects/{auth.project}'
     secret_id = name.replace('/', '-')
-    secret_name = f'{parent}/secrets/{secret_id}'
+    secret_path = f'{parent}/secrets/{secret_id}'
 
     try:
-        client.get_secret(name=secret_name)
-    except Exception:
-        client.create_secret(
-            parent=parent,
-            secret_id=secret_id,
-            secret=secretmanager_v1.Secret(
-                replication=secretmanager_v1.Replication(
-                    automatic=secretmanager_v1.Replication.Automatic()
-                ),
-                labels=labels or {},
-            ),
+        client.get_secret(name=secret_path)
+    except NotFound:
+        replication = secretmanager_v1.Replication(
+            automatic=secretmanager_v1.Replication.Automatic(
+                customer_managed_encryption=(
+                    secretmanager_v1.CustomerManagedEncryption(kms_key_name=kms_key_name)
+                    if kms_key_name else None
+                )
+            )
         )
+        secret_body = secretmanager_v1.Secret(
+            replication=replication,
+            labels=labels or {},
+        )
+        if rotation_period:
+            import datetime
+            period_secs = int(rotation_period.rstrip('s'))
+            secret_body.rotation = secretmanager_v1.Rotation(
+                rotation_period=secretmanager_v1.Duration(seconds=period_secs),
+                next_rotation_time=(
+                    secretmanager_v1.Timestamp().FromDatetime(
+                        datetime.datetime.fromisoformat(next_rotation_time)
+                        if next_rotation_time
+                        else datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(seconds=period_secs)
+                    )
+                ),
+            )
+        client.create_secret(parent=parent, secret_id=secret_id, secret=secret_body)
 
     version = client.add_secret_version(
-        parent=secret_name,
+        parent=secret_path,
         payload=secretmanager_v1.SecretPayload(data=value.encode()),
     )
-    return {'name': secret_name, 'version': version.name}
+    return {'name': secret_path, 'version': version.name}
 
 
 def get_secret(auth, name: str, version: str = 'latest') -> str:
     """Retrieve the value of a Secret Manager secret version."""
     client = _sm(auth)
     secret_id = name.replace('/', '-')
-    full_name = (
-        f'projects/{auth.project}/secrets/{secret_id}/versions/{version}'
-    )
+    full_name = f'projects/{auth.project}/secrets/{secret_id}/versions/{version}'
     response = client.access_secret_version(name=full_name)
     return response.payload.data.decode()
 
@@ -172,16 +217,8 @@ def secret_name(auth, name: str) -> str:
     secret_id = name.replace('/', '-')
     return f'projects/{auth.project}/secrets/{secret_id}'
 
-# %% ../nbs/04_network.ipynb #b96a1473
-def _iam(auth):
-    return googleapiclient.discovery.build('iam', 'v1', credentials=auth.credentials)
 
-
-def _crm(auth):
-    return googleapiclient.discovery.build('cloudresourcemanager', 'v1',
-                                           credentials=auth.credentials)
-
-
+# %% ../nbs/04_network.ipynb #ad1daed3
 def create_service_account(
     auth,
     name: str,
@@ -189,23 +226,25 @@ def create_service_account(
     **_,
 ) -> dict:
     """Create a GCP service account. Returns existing account if already present."""
-    iam = _iam(auth)
-    project_name = f'projects/{auth.project}'
+    client = iam_admin_v1.IAMClient(credentials=auth.credentials)
+    project_path = f'projects/{auth.project}'
     email = f'{name}@{auth.project}.iam.gserviceaccount.com'
+    sa_path = f'{project_path}/serviceAccounts/{email}'
 
     try:
-        existing = iam.projects().serviceAccounts().get(
-            name=f'{project_name}/serviceAccounts/{email}'
-        ).execute()
-        return {'email': existing['email'], 'name': existing['name']}
-    except Exception:
+        existing = client.get_service_account(name=sa_path)
+        return {'email': existing.email, 'name': existing.name}
+    except NotFound:
         pass
 
-    body = {'accountId': name, 'serviceAccount': {'displayName': display_name or name}}
-    result = iam.projects().serviceAccounts().create(
-        name=project_name, body=body
-    ).execute()
-    return {'email': result['email'], 'name': result['name']}
+    sa = client.create_service_account(
+        request=iam_admin_v1.CreateServiceAccountRequest(
+            name=project_path,
+            account_id=name,
+            service_account=iam_admin_v1.ServiceAccount(display_name=display_name or name),
+        )
+    )
+    return {'email': sa.email, 'name': sa.name}
 
 
 def bind_iam_role(
@@ -214,35 +253,79 @@ def bind_iam_role(
     role: str,
     member_type: str = 'serviceAccount',
 ):
-    """Bind a project-level IAM role to a member (service account, user, or group)."""
-    crm = _crm(auth)
-    policy = crm.projects().getIamPolicy(
-        resource=auth.project, body={}
-    ).execute()
+    """Bind a project-level IAM role to a member (service account, user, or group).
 
-    member = f'{member_type}:{member_email}'
-    for binding in policy.get('bindings', []):
-        if binding['role'] == role:
-            if member not in binding['members']:
-                binding['members'].append(member)
-            crm.projects().setIamPolicy(
-                resource=auth.project, body={'policy': policy}
-            ).execute()
-            return
-
-    policy.setdefault('bindings', []).append(
-        {'role': role, 'members': [member]}
+    Uses read-modify-write with etag for safe concurrent updates.
+    """
+    crm = resourcemanager_v3.ProjectsClient(credentials=auth.credentials)
+    resource = f'projects/{auth.project}'
+    policy = crm.get_iam_policy(
+        request=iam_policy_pb2.GetIamPolicyRequest(resource=resource)
     )
-    crm.projects().setIamPolicy(
-        resource=auth.project, body={'policy': policy}
-    ).execute()
+    member = f'{member_type}:{member_email}'
+    for binding in policy.bindings:
+        if binding.role == role:
+            if member not in binding.members:
+                binding.members.append(member)
+            break
+    else:
+        policy.bindings.append(policy_pb2.Binding(role=role, members=[member]))
+    crm.set_iam_policy(
+        request=iam_policy_pb2.SetIamPolicyRequest(resource=resource, policy=policy)
+    )
 
 
 def sa_email(auth, name: str) -> str:
     "Return the full email address for a service account in this project."
     return f'{name}@{auth.project}.iam.gserviceaccount.com'
 
-# %% ../nbs/04_network.ipynb #d95d76eb
+
+def list_sa_keys(auth, sa_name: str) -> list:
+    """List service account keys with their age in days."""
+    import datetime
+    client = iam_admin_v1.IAMClient(credentials=auth.credentials)
+    email = sa_email(auth, sa_name)
+    result = client.list_service_account_keys(
+        name=f'projects/{auth.project}/serviceAccounts/{email}'
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    keys = []
+    for k in result.keys:
+        age = (now - k.valid_after_time).days if k.valid_after_time else None
+        keys.append({'name': k.name, 'key_type': str(k.key_type), 'age_days': age})
+    return keys
+
+
+def rotate_sa_key(auth, sa_name: str, max_age_days: int = 90) -> dict:
+    """Create a new service account key and delete keys older than `max_age_days`.
+
+    Returns the new key JSON (base64-decoded private_key_data).
+    """
+    import datetime, base64
+    client = iam_admin_v1.IAMClient(credentials=auth.credentials)
+    email = sa_email(auth, sa_name)
+    sa_path = f'projects/{auth.project}/serviceAccounts/{email}'
+
+    new_key = client.create_service_account_key(
+        request=iam_admin_v1.CreateServiceAccountKeyRequest(name=sa_path)
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for k in client.list_service_account_keys(name=sa_path).keys:
+        if k.name == new_key.name:
+            continue
+        age = (now - k.valid_after_time).days if k.valid_after_time else 0
+        if age > max_age_days:
+            try:
+                client.delete_service_account_key(name=k.name)
+            except NotFound:
+                pass
+    return {
+        'name': new_key.name,
+        'private_key_data': base64.b64decode(new_key.private_key_data).decode(),
+    }
+
+
+# %% ../nbs/04_network.ipynb #13292238
 def create_private_service_connect(
     auth,
     name: str,
@@ -254,7 +337,7 @@ def create_private_service_connect(
 ) -> dict:
     """Create a Private Service Connect forwarding rule for a managed GCP service.
 
-    `service_attachment` is the PSC service attachment URI, e.g.:
+    `service_attachment` is the PSC attachment URI, e.g.:
       `projects/xxx/regions/us-central1/serviceAttachments/my-service`
     """
     fr_client = compute_v1.ForwardingRulesClient(credentials=auth.credentials)
@@ -262,7 +345,7 @@ def create_private_service_connect(
         existing = fr_client.get(project=auth.project, region=auth.region,
                                  forwarding_rule=name)
         return {'name': name, 'ip': existing.I_p_address}
-    except Exception:
+    except NotFound:
         pass
 
     body = compute_v1.ForwardingRule(
@@ -272,7 +355,7 @@ def create_private_service_connect(
             f'projects/{auth.project}/regions/{auth.region}/subnetworks/{subnet}'
         ),
         target=service_attachment,
-        load_balancing_scheme='',  # PSC uses empty string
+        load_balancing_scheme='',
         I_p_address=ip_address,
     )
     op = fr_client.insert(project=auth.project, region=auth.region,
@@ -280,7 +363,8 @@ def create_private_service_connect(
     op.result(timeout=120)
     return {'name': name}
 
-# %% ../nbs/04_network.ipynb #eddd03e8
+
+# %% ../nbs/04_network.ipynb #46d7c671
 def create_cdn_backend(
     auth,
     name: str,
@@ -293,7 +377,7 @@ def create_cdn_backend(
     try:
         existing = client.get(project=auth.project, backend_bucket=name)
         return {'name': name, 'self_link': existing.self_link}
-    except Exception:
+    except NotFound:
         pass
 
     backend = compute_v1.BackendBucket(
@@ -309,63 +393,236 @@ def create_cdn_backend(
     return {'name': name}
 
 
+def create_managed_cert(auth, name: str, domains: list) -> dict:
+    """Create a Google-managed SSL certificate for the given domains."""
+    client = compute_v1.SslCertificatesClient(credentials=auth.credentials)
+    try:
+        existing = client.get(project=auth.project, ssl_certificate=name)
+        return {'name': name, 'self_link': existing.self_link}
+    except NotFound:
+        pass
+    cert = compute_v1.SslCertificate(
+        name=name,
+        type_=compute_v1.SslCertificate.Type.MANAGED,
+        managed=compute_v1.SslCertificateManagedSslCertificate(domains=domains),
+    )
+    op = client.insert(project=auth.project, ssl_certificate_resource=cert)
+    op.result(timeout=60)
+    result = client.get(project=auth.project, ssl_certificate=name)
+    return {'name': name, 'self_link': result.self_link}
+
+
 def create_https_lb(
     auth,
     name: str,
     backend_service: str,
     armor_policy: str = None,
+    ssl_cert: str = None,
     **_,
 ) -> dict:
-    """Create a global HTTPS load balancer with optional Cloud Armor security policy.
+    """Create a global HTTPS load balancer with optional Cloud Armor and managed SSL cert.
 
     Creates: URL map → target HTTPS proxy → global forwarding rule.
     Pass `armor_policy` as the full resource URL of a Cloud Armor security policy.
+    Pass `ssl_cert` as the self_link from `create_managed_cert()`.
     """
-    compute = googleapiclient.discovery.build(
-        'compute', 'v1', credentials=auth.credentials
-    )
     project = auth.project
 
     # URL map
+    url_client = compute_v1.UrlMapsClient(credentials=auth.credentials)
     url_map_name = f'{name}-url-map'
     try:
-        compute.urlMaps().get(project=project, urlMap=url_map_name).execute()
-    except Exception:
-        compute.urlMaps().insert(project=project, body={
-            'name': url_map_name,
-            'defaultService': backend_service,
-        }).execute()
+        url_client.get(project=project, url_map=url_map_name)
+    except NotFound:
+        op = url_client.insert(
+            project=project,
+            url_map_resource=compute_v1.UrlMap(
+                name=url_map_name,
+                default_service=backend_service,
+            ),
+        )
+        op.result(timeout=120)
 
-    # HTTPS proxy (requires SSL cert — omitted here for brevity; use managed cert)
+    # HTTPS proxy
+    proxy_client = compute_v1.TargetHttpsProxiesClient(credentials=auth.credentials)
     proxy_name = f'{name}-https-proxy'
     try:
-        compute.targetHttpsProxies().get(project=project,
-                                         targetHttpsProxy=proxy_name).execute()
-    except Exception:
-        compute.targetHttpsProxies().insert(project=project, body={
-            'name': proxy_name,
-            'urlMap': f'global/urlMaps/{url_map_name}',
-            'sslCertificates': [],  # attach managed cert separately
-        }).execute()
+        proxy_client.get(project=project, target_https_proxy=proxy_name)
+    except NotFound:
+        proxy = compute_v1.TargetHttpsProxy(
+            name=proxy_name,
+            url_map=f'global/urlMaps/{url_map_name}',
+            ssl_certificates=[ssl_cert] if ssl_cert else [],
+        )
+        op = proxy_client.insert(project=project, target_https_proxy_resource=proxy)
+        op.result(timeout=120)
 
     # Global forwarding rule
+    fr_client = compute_v1.GlobalForwardingRulesClient(credentials=auth.credentials)
     fr_name = f'{name}-fr'
     try:
-        fr = compute.globalForwardingRules().get(
-            project=project, forwardingRule=fr_name
-        ).execute()
-        return {'name': fr_name, 'ip': fr.get('IPAddress')}
-    except Exception:
+        fr = fr_client.get(project=project, forwarding_rule=fr_name)
+        return {'name': fr_name, 'ip': fr.I_p_address}
+    except NotFound:
         pass
 
-    body = {
-        'name': fr_name,
-        'target': f'global/targetHttpsProxies/{proxy_name}',
-        'portRange': '443',
-        'IPProtocol': 'TCP',
-        'loadBalancingScheme': 'EXTERNAL_MANAGED',
-    }
+    fr_body = compute_v1.ForwardingRule(
+        name=fr_name,
+        target=f'global/targetHttpsProxies/{proxy_name}',
+        port_range='443',
+        I_p_protocol='TCP',
+        load_balancing_scheme='EXTERNAL_MANAGED',
+    )
     if armor_policy:
-        body['securityPolicy'] = armor_policy
-    op = compute.globalForwardingRules().insert(project=project, body=body).execute()
-    return {'name': fr_name, 'operation': op.get('name')}
+        fr_body.security_policy = armor_policy
+    op = fr_client.insert(project=project, forwarding_rule_resource=fr_body)
+    op.result(timeout=120)
+    result = fr_client.get(project=project, forwarding_rule=fr_name)
+    return {'name': fr_name, 'ip': result.I_p_address}
+
+
+# %% ../nbs/04_network.ipynb #5e258604
+def create_kms_key(
+    auth,
+    ring_name: str,
+    key_name: str,
+    rotation_period: str = '7776000s',
+    location: str = None,
+) -> str:
+    """Create a Cloud KMS key ring and symmetric encryption key. Returns the key resource name.
+
+    `rotation_period` defaults to 90 days (`7776000s`). Pass `None` to disable auto-rotation.
+    The returned resource name can be passed as `kms_key_name` to any `create_*` function.
+    """
+    import datetime
+    location = location or auth.region
+    client = kms_v1.KeyManagementServiceClient(credentials=auth.credentials)
+    parent = f'projects/{auth.project}/locations/{location}'
+    ring_full = f'{parent}/keyRings/{ring_name}'
+    key_full = f'{ring_full}/cryptoKeys/{key_name}'
+
+    try:
+        client.create_key_ring(
+            parent=parent, key_ring_id=ring_name, key_ring=kms_v1.KeyRing()
+        )
+    except AlreadyExists:
+        pass
+
+    try:
+        client.get_crypto_key(name=key_full)
+        return key_full
+    except NotFound:
+        pass
+
+    key_body = kms_v1.CryptoKey(
+        purpose=kms_v1.CryptoKey.CryptoKeyPurpose.ENCRYPT_DECRYPT,
+        version_template=kms_v1.CryptoKeyVersionTemplate(
+            algorithm=kms_v1.CryptoKeyVersion.CryptoKeyVersionAlgorithm.GOOGLE_SYMMETRIC_ENCRYPTION,
+        ),
+    )
+    if rotation_period:
+        period_secs = int(rotation_period.rstrip('s'))
+        key_body.rotation_period = datetime.timedelta(seconds=period_secs)
+        key_body.next_rotation_time = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(seconds=period_secs)
+        )
+    client.create_crypto_key(parent=ring_full, crypto_key_id=key_name, crypto_key=key_body)
+    return key_full
+
+
+# %% ../nbs/04_network.ipynb #25b26ef6
+def enable_audit_logs(auth, services: list = None) -> dict:
+    """Enable Cloud Audit Logs (DATA_READ, DATA_WRITE, ADMIN_READ) for the project.
+
+    Equivalent to CloudTrail for AWS. Maps to SOC 2 CC7.1 / CC7.2.
+    Pass `services` to limit to specific APIs (e.g. `['storage.googleapis.com']`).
+    Defaults to `allServices`.
+    """
+    crm = resourcemanager_v3.ProjectsClient(credentials=auth.credentials)
+    resource = f'projects/{auth.project}'
+    policy = crm.get_iam_policy(
+        request=iam_policy_pb2.GetIamPolicyRequest(resource=resource)
+    )
+    log_types = [
+        policy_pb2.AuditLogConfig.LogType.DATA_READ,
+        policy_pb2.AuditLogConfig.LogType.DATA_WRITE,
+        policy_pb2.AuditLogConfig.LogType.ADMIN_READ,
+    ]
+    existing_svcs = {ac.service for ac in policy.audit_configs}
+    for svc in (services or ['allServices']):
+        if svc not in existing_svcs:
+            policy.audit_configs.append(
+                policy_pb2.AuditConfig(
+                    service=svc,
+                    audit_log_configs=[policy_pb2.AuditLogConfig(log_type=lt) for lt in log_types],
+                )
+            )
+    crm.set_iam_policy(
+        request=iam_policy_pb2.SetIamPolicyRequest(resource=resource, policy=policy)
+    )
+    return {'audit_logs': 'enabled', 'services': services or ['allServices']}
+
+
+# %% ../nbs/04_network.ipynb #fb88546f
+def create_armor_policy(
+    auth,
+    name: str,
+    rules: list = None,
+) -> dict:
+    """Create a Cloud Armor security policy with OWASP Top 10 preconfigured rules.
+
+    Default rules block XSS, SQLi, LFI, RCE, plus a 10k req/min rate limit per IP.
+    Returns the policy self_link for use in `create_https_lb(armor_policy=...)`.
+    """
+    client = compute_v1.SecurityPoliciesClient(credentials=auth.credentials)
+    try:
+        existing = client.get(project=auth.project, security_policy=name)
+        return {'name': name, 'self_link': existing.self_link}
+    except NotFound:
+        pass
+
+    def _expr_rule(priority, expr, desc):
+        return compute_v1.SecurityPolicyRule(
+            priority=priority, action='deny(403)',
+            match=compute_v1.SecurityPolicyRuleMatcher(
+                expr=compute_v1.Expr(expression=expr)
+            ),
+            description=desc,
+        )
+
+    default_rules = rules or [
+        _expr_rule(1000, "evaluatePreconfiguredExpr('xss-stable')", 'Block XSS'),
+        _expr_rule(1001, "evaluatePreconfiguredExpr('sqli-stable')", 'Block SQLi'),
+        _expr_rule(1002, "evaluatePreconfiguredExpr('lfi-stable')", 'Block LFI'),
+        _expr_rule(1003, "evaluatePreconfiguredExpr('rce-stable')", 'Block RCE'),
+        compute_v1.SecurityPolicyRule(
+            priority=2000, action='throttle',
+            match=compute_v1.SecurityPolicyRuleMatcher(
+                versioned_expr=compute_v1.SecurityPolicyRuleMatcher.VersionedExpr.SRC_IPS_V1,
+                config=compute_v1.SecurityPolicyRuleMatcherConfig(src_ip_ranges=['*']),
+            ),
+            rate_limit_options=compute_v1.SecurityPolicyRuleRateLimitOptions(
+                rate_limit_threshold=compute_v1.SecurityPolicyRuleRateLimitOptionsThreshold(
+                    count=10000, interval_sec=60,
+                ),
+                conform_action='allow',
+                exceed_action='deny(429)',
+            ),
+            description='Rate limit: 10k req/min per IP',
+        ),
+        compute_v1.SecurityPolicyRule(
+            priority=2147483647, action='allow',
+            match=compute_v1.SecurityPolicyRuleMatcher(
+                versioned_expr=compute_v1.SecurityPolicyRuleMatcher.VersionedExpr.SRC_IPS_V1,
+                config=compute_v1.SecurityPolicyRuleMatcherConfig(src_ip_ranges=['*']),
+            ),
+            description='Default: allow',
+        ),
+    ]
+    policy = compute_v1.SecurityPolicy(name=name, rules=default_rules)
+    op = client.insert(project=auth.project, security_policy_resource=policy)
+    op.result(timeout=120)
+    result = client.get(project=auth.project, security_policy=name)
+    return {'name': name, 'self_link': result.self_link}
+

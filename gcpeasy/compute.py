@@ -4,17 +4,22 @@
 
 # %% auto #0
 __all__ = ['create_instance', 'instance_ip', 'start_instance', 'stop_instance', 'delete_instance', 'create_gke_cluster',
-           'gke_kubeconfig', 'scale_gke', 'create_artifact_registry', 'registry_url', 'attach_registry_to_gke']
+           'gke_kubeconfig', 'scale_gke', 'create_artifact_registry', 'registry_url', 'attach_registry_to_gke',
+           'deploy_cloudrun', 'create_binary_auth_policy']
 
-# %% ../nbs/03_compute.ipynb #066ed635
+# %% ../nbs/03_compute.ipynb #b0cf3698
 try:
     from google.cloud import compute_v1
     from google.cloud import container_v1
     from google.cloud import artifactregistry_v1
+    from google.cloud import run_v2
+    from google.cloud import binaryauthorization_v1
+    from google.api_core.exceptions import NotFound, AlreadyExists
 except ImportError:
     pass
 
-# %% ../nbs/03_compute.ipynb #50f79226
+
+# %% ../nbs/03_compute.ipynb #1c1f2b61
 def _latest_debian_image(auth, zone: str) -> str:
     """Return the latest Debian 12 image selfLink."""
     client = compute_v1.ImagesClient(credentials=auth.credentials)
@@ -32,44 +37,60 @@ def create_instance(
     image: str = None,
     disk_size_gb: int = 20,
     shielded: bool = True,
+    network: str = 'default',
+    subnet: str = None,
+    os_login: bool = True,
+    kms_key_name: str = None,
     labels: dict = None,
     **_,
 ) -> dict:
     """Create a Compute Engine VM instance.
 
-    Shielded VM (secure boot + vTPM + integrity monitoring) is enabled by default.
-    Uses the latest Debian 12 image if `image` is not provided.
+    Shielded VM (secure boot + vTPM + integrity monitoring) enabled by default.
+    OS Login enabled by default — replaces project SSH keys with IAM-controlled access (CC6.1).
+    Pass `kms_key_name` for CMEK disk encryption.
+    Pass `network` / `subnet` to place the instance in a specific VPC.
     """
     zone = zone or f'{auth.region}-a'
     client = compute_v1.InstancesClient(credentials=auth.credentials)
 
-    # Check if instance already exists
     try:
         existing = client.get(project=auth.project, zone=zone, instance=name)
         return {'name': name, 'zone': zone, 'status': existing.status}
-    except Exception:
+    except NotFound:
         pass
 
     source_image = image or _latest_debian_image(auth, zone)
+    disk = compute_v1.AttachedDisk(
+        boot=True,
+        auto_delete=True,
+        initialize_params=compute_v1.AttachedDiskInitializeParams(
+            source_image=source_image,
+            disk_size_gb=disk_size_gb,
+        ),
+    )
+    if kms_key_name:
+        disk.disk_encryption_key = compute_v1.CustomerEncryptionKey(kms_key_name=kms_key_name)
+
+    nic_kwargs = {'name': f'global/networks/{network}'}
+    if subnet:
+        nic_kwargs['subnetwork'] = (
+            f'projects/{auth.project}/regions/{zone[:-2]}/subnetworks/{subnet}'
+        )
+
+    metadata = (
+        compute_v1.Metadata(
+            items=[compute_v1.Items(key='enable-oslogin', value='TRUE')]
+        ) if os_login else None
+    )
+
     instance = compute_v1.Instance(
         name=name,
         machine_type=f'zones/{zone}/machineTypes/{machine_type}',
-        disks=[
-            compute_v1.AttachedDisk(
-                boot=True,
-                auto_delete=True,
-                initialize_params=compute_v1.AttachedDiskInitializeParams(
-                    source_image=source_image,
-                    disk_size_gb=disk_size_gb,
-                ),
-            )
-        ],
-        network_interfaces=[
-            compute_v1.NetworkInterface(
-                name='global/networks/default',
-            )
-        ],
+        disks=[disk],
+        network_interfaces=[compute_v1.NetworkInterface(**nic_kwargs)],
         labels=labels or {},
+        metadata=metadata,
         shielded_instance_config=(
             compute_v1.ShieldedInstanceConfig(
                 enable_secure_boot=True,
@@ -115,7 +136,8 @@ def delete_instance(auth, name: str, zone: str = None):
     op = client.delete(project=auth.project, zone=zone, instance=name)
     op.result()
 
-# %% ../nbs/03_compute.ipynb #bc54aad1
+
+# %% ../nbs/03_compute.ipynb #b2f0acd9
 def create_gke_cluster(
     auth,
     name: str,
@@ -123,31 +145,51 @@ def create_gke_cluster(
     machine_type: str = 'e2-standard-4',
     autopilot: bool = True,
     workload_identity: bool = True,
+    private_nodes: bool = True,
+    binary_authorization: bool = False,
     labels: dict = None,
     **_,
 ) -> dict:
-    """Create a GKE cluster. Defaults to Autopilot mode with Workload Identity."""
+    """Create a GKE cluster. Defaults to Autopilot + Workload Identity.
+
+    `private_nodes=True` (Standard mode only) enables private node VMs — no public IPs (CC6.6).
+    `binary_authorization=True` enforces image signing via project Binary Authorization policy.
+    """
     client = container_v1.ClusterManagerClient(credentials=auth.credentials)
     parent = f'projects/{auth.project}/locations/{auth.region}'
 
     try:
         existing = client.get_cluster(name=f'{parent}/clusters/{name}')
         return {'name': name, 'endpoint': existing.endpoint, 'status': str(existing.status)}
-    except Exception:
+    except NotFound:
         pass
+
+    wi_config = (
+        container_v1.WorkloadIdentityConfig(workload_pool=f'{auth.project}.svc.id.goog')
+        if workload_identity else None
+    )
+    binauth = (
+        container_v1.BinaryAuthorization(
+            evaluation_mode=container_v1.BinaryAuthorization.EvaluationMode.PROJECT_SINGLETON_POLICY_ENFORCE
+        ) if binary_authorization else None
+    )
 
     if autopilot:
         cluster = container_v1.Cluster(
             name=name,
             autopilot=container_v1.Autopilot(enabled=True),
-            workload_identity_config=(
-                container_v1.WorkloadIdentityConfig(
-                    workload_pool=f'{auth.project}.svc.id.goog'
-                ) if workload_identity else None
-            ),
+            workload_identity_config=wi_config,
+            binary_authorization=binauth,
             resource_labels=labels or {},
         )
     else:
+        private_cfg = (
+            container_v1.PrivateClusterConfig(
+                enable_private_nodes=True,
+                enable_private_endpoint=False,
+                master_ipv4_cidr_block='172.16.0.0/28',
+            ) if private_nodes else None
+        )
         cluster = container_v1.Cluster(
             name=name,
             node_pools=[
@@ -164,18 +206,13 @@ def create_gke_cluster(
                     ),
                 )
             ],
-            workload_identity_config=(
-                container_v1.WorkloadIdentityConfig(
-                    workload_pool=f'{auth.project}.svc.id.goog'
-                ) if workload_identity else None
-            ),
+            private_cluster_config=private_cfg,
+            workload_identity_config=wi_config,
+            binary_authorization=binauth,
             resource_labels=labels or {},
         )
 
-    op = client.create_cluster(
-        parent=parent,
-        cluster=cluster,
-    )
+    op = client.create_cluster(parent=parent, cluster=cluster)
     return {'name': name, 'operation': op.name}
 
 
@@ -204,7 +241,8 @@ def scale_gke(auth, name: str, node_pool: str, node_count: int):
     )
     return op.name
 
-# %% ../nbs/03_compute.ipynb #352af059
+
+# %% ../nbs/03_compute.ipynb #4e109025
 def create_artifact_registry(
     auth,
     name: str,
@@ -221,7 +259,7 @@ def create_artifact_registry(
             name=f'{parent}/repositories/{name}'
         )
         return {'name': existing.name, 'format': format}
-    except Exception:
+    except NotFound:
         pass
 
     repo = artifactregistry_v1.Repository(
@@ -247,3 +285,114 @@ def attach_registry_to_gke(auth, registry_name: str, gke_sa_email: str):
     from gcpeasy.network import bind_iam_role
     bind_iam_role(auth, gke_sa_email, 'roles/artifactregistry.reader')
     return {'registry': registry_name, 'sa': gke_sa_email, 'role': 'roles/artifactregistry.reader'}
+
+
+# %% ../nbs/03_compute.ipynb #58d75e93
+def deploy_cloudrun(
+    auth,
+    name: str,
+    image: str,
+    port: int = 8080,
+    memory: str = '512Mi',
+    cpu: str = '1',
+    min_instances: int = 0,
+    max_instances: int = 10,
+    allow_unauthenticated: bool = False,
+    service_account: str = None,
+    env: dict = None,
+    labels: dict = None,
+    **compliance_opts,
+) -> dict:
+    """Deploy a Cloud Run service. Returns service name and URL.
+
+    Default ingress: `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` (not fully public).
+    Set `allow_unauthenticated=True` to grant `allUsers` the `roles/run.invoker` role.
+    """
+    env_vars = [run_v2.EnvVar(name=k, value=v) for k, v in (env or {}).items()]
+    service_body = run_v2.Service(
+        labels=labels or {},
+        ingress=run_v2.IngressTraffic.INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER,
+        template=run_v2.RevisionTemplate(
+            service_account=service_account or '',
+            containers=[
+                run_v2.Container(
+                    image=image,
+                    ports=[run_v2.ContainerPort(container_port=port)],
+                    resources=run_v2.ResourceRequirements(
+                        limits={'memory': memory, 'cpu': cpu},
+                    ),
+                    env=env_vars,
+                )
+            ],
+            scaling=run_v2.RevisionScaling(
+                min_instance_count=min_instances,
+                max_instance_count=max_instances,
+            ),
+        ),
+    )
+
+    client = run_v2.ServicesClient(credentials=auth.credentials)
+    parent = f'projects/{auth.project}/locations/{auth.region}'
+    svc_name = f'{parent}/services/{name}'
+
+    try:
+        client.get_service(name=svc_name)
+        service_body.name = svc_name
+        op = client.update_service(service=service_body)
+    except NotFound:
+        op = client.create_service(parent=parent, service=service_body, service_id=name)
+
+    result = op.result(timeout=300)
+
+    if allow_unauthenticated:
+        from google.iam.v1 import iam_policy_pb2, policy_pb2
+        policy = client.get_iam_policy(
+            request=iam_policy_pb2.GetIamPolicyRequest(resource=svc_name)
+        )
+        policy.bindings.append(policy_pb2.Binding(role='roles/run.invoker', members=['allUsers']))
+        client.set_iam_policy(
+            request=iam_policy_pb2.SetIamPolicyRequest(resource=svc_name, policy=policy)
+        )
+
+    return {'name': result.name, 'url': result.uri}
+
+
+def create_binary_auth_policy(
+    auth,
+    require_attestors: list = None,
+) -> dict:
+    """Set the project Binary Authorization policy.
+
+    `require_attestors=None` → ALWAYS_ALLOW (permissive; enforcement opt-in via `create_gke_cluster`).
+    `require_attestors=[]`   → ALWAYS_DENY (block all unattested images).
+    `require_attestors=[..]` → REQUIRE_ATTESTATION from listed attestors.
+    """
+    client = binaryauthorization_v1.BinauthzManagementServiceV1Client(
+        credentials=auth.credentials
+    )
+    policy_name = f'projects/{auth.project}/policy'
+
+    if require_attestors is None:
+        default_rule = binaryauthorization_v1.AdmissionRule(
+            evaluation_mode=binaryauthorization_v1.AdmissionRule.EvaluationMode.ALWAYS_ALLOW,
+            enforcement_mode=binaryauthorization_v1.AdmissionRule.EnforcementMode.ENFORCED_BLOCK_AND_AUDIT_LOG,
+        )
+    elif require_attestors:
+        default_rule = binaryauthorization_v1.AdmissionRule(
+            evaluation_mode=binaryauthorization_v1.AdmissionRule.EvaluationMode.REQUIRE_ATTESTATION,
+            enforcement_mode=binaryauthorization_v1.AdmissionRule.EnforcementMode.ENFORCED_BLOCK_AND_AUDIT_LOG,
+            require_attestations_by=require_attestors,
+        )
+    else:
+        default_rule = binaryauthorization_v1.AdmissionRule(
+            evaluation_mode=binaryauthorization_v1.AdmissionRule.EvaluationMode.ALWAYS_DENY,
+            enforcement_mode=binaryauthorization_v1.AdmissionRule.EnforcementMode.ENFORCED_BLOCK_AND_AUDIT_LOG,
+        )
+
+    policy = binaryauthorization_v1.Policy(
+        name=policy_name,
+        default_admission_rule=default_rule,
+    )
+    result = client.update_policy(policy=policy)
+    return {'name': result.name, 'update_time': str(result.update_time)}
+

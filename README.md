@@ -108,13 +108,14 @@ print(stack.summary())
 
 ## Module Reference
 
-| Module | AWS equivalent | Key functions |
-|---|---|---|
-| `gcpeasy.core` | `awseasy.core` | `GCPAuth`, `HIPAA/ISO27001/SOC2`, `GenAIStack` |
-| `gcpeasy.ai` | `awseasy.ai` | `generate_content`, `create_vector_search_index`, `create_search_app` |
-| `gcpeasy.data` | `awseasy.data` | `create_bucket`, `create_collection`, `create_postgres`, `create_redis` |
-| `gcpeasy.compute` | `awseasy.compute` | `create_instance`, `create_gke_cluster`, `create_artifact_registry` |
-| `gcpeasy.network` | `awseasy.network` | `create_vpc`, `create_secret`, `create_service_account`, `create_https_lb` |
+| Module | Key functions |
+|---|---|
+| `gcpeasy.core` | `GCPAuth`, `HIPAA/ISO27001/SOC2`, `find_resources`, `GenAIStack` |
+| `gcpeasy.ai` | `generate_content`, `list_models`, `create_vector_search_index`, `create_search_app`, `search_query` |
+| `gcpeasy.data` | `create_bucket`, `signed_url`, `create_postgres`, `create_redis`, `create_topic`, `create_subscription` |
+| `gcpeasy.compute` | `create_instance`, `create_gke_cluster`, `create_artifact_registry`, `deploy_cloudrun`, `create_binary_auth_policy` |
+| `gcpeasy.network` | `create_vpc`, `add_subnet`, `create_firewall_rule`, `create_secret`, `create_service_account`, `bind_iam_role`, `list_sa_keys`, `rotate_sa_key`, `create_kms_key`, `enable_audit_logs`, `create_armor_policy`, `create_managed_cert`, `create_https_lb` |
+
 
 ## Vertex AI — Generative Models
 
@@ -163,101 +164,137 @@ print(bucket_url('my-app-data', 'docs/readme.md'))
 url = signed_url(auth, 'my-app-data', 'private/file.pdf', hours=2)
 ```
 
-## Firestore, Cloud SQL, Memorystore
+## Firestore, Cloud SQL, Memorystore, Pub/Sub
+
 
 ```python
 from gcpeasy.data import (
     create_collection, firestore_conn,
     create_postgres, postgres_conn,
     create_redis, redis_conn,
+    create_topic, create_subscription,
 )
 
 # Firestore collection (created on first write)
-coll = create_collection(auth, 'user-sessions')
+coll = create_collection(auth, 'events')
 
-# Cloud SQL PostgreSQL
-pg = create_postgres(auth, 'app-db', tier='db-g1-small')
-conn_str = postgres_conn(auth, 'app-db')  # for cloud-sql-python-connector
+# Cloud SQL PostgreSQL (SSL always on)
+db = create_postgres(auth, 'myapp-db', **HIPAA)  # HIPAA: 35 backups, deletion protection
+conn_str = postgres_conn(auth, 'myapp-db')  # → 'project:region:myapp-db'
 
-# Memorystore Redis with TLS
-redis = create_redis(auth, 'app-cache', transit_encryption=True)
-uri = redis_conn(auth, 'app-cache')  # redis://host:port
+# Memorystore Redis (auto STANDARD_HA with HIPAA profile)
+cache = create_redis(auth, 'myapp-cache', **HIPAA)
+
+# Pub/Sub
+topic = create_topic(auth, 'events', kms_key_name=kms_key)  # optional CMEK
+sub   = create_subscription(auth, 'events', 'events-worker', dead_letter_topic='events-dlq')
 ```
 
-## Compute Engine, GKE, Artifact Registry
+## Compute Engine, GKE, Artifact Registry, Cloud Run
+
 
 ```python
 from gcpeasy.compute import (
     create_instance, instance_ip,
     create_gke_cluster, gke_kubeconfig,
     create_artifact_registry, registry_url,
+    deploy_cloudrun, create_binary_auth_policy,
 )
 
-# Shielded VM (secure boot + vTPM + integrity monitoring on by default)
-vm = create_instance(auth, 'ml-worker', machine_type='n2-standard-4')
-print(instance_ip(auth, 'ml-worker'))
+# Shielded VM + OS Login (IAM-controlled SSH) on a named VPC
+vm = create_instance(auth, 'worker', network='prod-vpc', subnet='prod-subnet')
 
-# GKE Autopilot cluster with Workload Identity
-cluster = create_gke_cluster(auth, 'prod-cluster', autopilot=True)
-kubeconfig = gke_kubeconfig(auth, 'prod-cluster')
+# GKE Autopilot — Workload Identity + Binary Authorization enforcement
+cluster = create_gke_cluster(auth, 'myapp-gke', binary_authorization=True)
 
-# Artifact Registry Docker repo
-repo = create_artifact_registry(auth, 'app-images')
-print(registry_url(auth, 'app-images'))
-# us-central1-docker.pkg.dev/my-project-id/app-images
+# GKE Standard — private nodes (no public IPs)
+cluster = create_gke_cluster(auth, 'myapp-gke', autopilot=False, private_nodes=True)
+
+# Cloud Run — internal load balancer ingress by default
+svc = deploy_cloudrun(auth, 'api', image='gcr.io/myproject/api:latest',
+                      service_account=sa_email, env={'ENV': 'prod'})
+print(svc['url'])
+
+# Binary Authorization policy — require attestation from named attestors
+create_binary_auth_policy(auth, require_attestors=['projects/my-project/attestors/prod-attestor'])
+
+# Artifact Registry
+registry = create_artifact_registry(auth, 'myapp-images')
+print(registry_url(auth, 'myapp-images'))
 ```
 
-## VPC, Secret Manager, IAM, Load Balancer
+## VPC, Secret Manager, IAM, KMS, Audit Logs, Cloud Armor, Load Balancer
+
 
 ```python
 from gcpeasy.network import (
     create_vpc, add_subnet, create_firewall_rule,
     create_secret, get_secret,
     create_service_account, bind_iam_role, sa_email,
-    create_https_lb,
+    list_sa_keys, rotate_sa_key,
+    create_kms_key, enable_audit_logs,
+    create_armor_policy, create_managed_cert, create_https_lb,
 )
 
-# Custom-mode VPC
-vpc = create_vpc(auth, 'app-vpc')
-subnet = add_subnet(auth, 'app-vpc', 'app-subnet', cidr='10.10.0.0/24')
-create_firewall_rule(auth, 'allow-https', 'app-vpc',
-                     protocol='tcp', ports=['443'])
+# VPC + subnet with VPC Flow Logs enabled (default)
+vpc    = create_vpc(auth, 'prod-vpc')
+subnet = add_subnet(auth, 'prod-vpc', 'prod-subnet', cidr='10.1.0.0/24')
 
-# Secret Manager
-create_secret(auth, 'app/db-password', 'my-secure-password')
-password = get_secret(auth, 'app/db-password')  # never logged
+# Firewall — source_ranges must be explicit (no implicit open-world default)
+create_firewall_rule(auth, 'allow-https', 'prod-vpc', ports=['443'],
+                     source_ranges=['10.1.0.0/24'])
 
-# Service Account + IAM binding
-sa = create_service_account(auth, 'app-backend',
-                            display_name='Backend Service Account')
-bind_iam_role(auth, sa['email'], 'roles/secretmanager.secretAccessor')
-print(sa_email(auth, 'app-backend'))
+# Cloud KMS — 90-day auto-rotation key
+kms_key = create_kms_key(auth, 'myapp-ring', 'data-key')
 
-# HTTPS Load Balancer with Cloud Armor
-lb = create_https_lb(auth, 'app-lb',
-                     backend_service='global/backendServices/app-backend')
+# Secret Manager with CMEK + rotation schedule
+create_secret(auth, 'myapp/db-password', 'hunter2',
+              kms_key_name=kms_key, rotation_period='7776000s')
+
+# Enable Cloud Audit Logs for all services (SOC 2 CC7.1)
+enable_audit_logs(auth)
+
+# Service account key rotation
+print(list_sa_keys(auth, 'myapp-sa'))  # shows age_days per key
+new_key = rotate_sa_key(auth, 'myapp-sa')  # creates new, deletes keys >90 days
+
+# Cloud Armor WAF policy (OWASP Top 10 + rate limit)
+armor = create_armor_policy(auth, 'prod-waf')
+
+# HTTPS LB with managed SSL cert + Cloud Armor
+cert = create_managed_cert(auth, 'myapp-cert', domains=['myapp.example.com'])
+lb   = create_https_lb(auth, 'prod-lb', backend_service=backend_svc,
+                        armor_policy=armor['self_link'], ssl_cert=cert['self_link'])
+print(lb['ip'])
 ```
 
 ## Security Defaults
 
-| Control | Implementation |
-|---|---|
-| No hardcoded credentials | ADC only; `service_account_file` if needed |
-| Encryption at rest | GCS (Google-managed), Firestore, Cloud SQL, Redis — all on by default |
-| Encryption in transit | Memorystore TLS, Cloud SQL `requireSsl=True` |
-| Uniform bucket access | GCS uniform bucket-level access always enabled |
-| Shielded VM | Secure boot + vTPM + integrity monitoring by default |
-| Workload Identity | GKE — node SA → pod SA mapping; no key files in pods |
-| Least privilege | Service Accounts + minimal IAM role bindings |
-| Secret management | Secret Manager; `get_secret()` returns string, never logged |
-| Idempotent operations | All `create_*` use create-or-return semantics |
-| Compliance profiles | HIPAA / ISO27001 / SOC2 as composable `**kwargs` |
+| Control | Implementation | Compliance |
+|---|---|---|
+| No hardcoded credentials | ADC only; `service_account_file` if needed | All |
+| Encryption at rest | GCS, Firestore, Cloud SQL, Memorystore — on by default | HIPAA §164.312, CC6.7 |
+| CMEK | `kms_key_name` on bucket/postgres/redis/instance/secret | HIPAA, ISO 27001 |
+| KMS auto-rotation | 90-day default via `create_kms_key` | NIST, ISO 27001 |
+| Encryption in transit | Memorystore `transit_encryption=True`, Cloud SQL `requireSsl=True` | CC6.7 |
+| Uniform bucket access | GCS uniform bucket-level access always enabled | CC6.7 |
+| Shielded VM | Secure boot + vTPM + integrity monitoring by default | CC6.6 |
+| OS Login | `os_login=True` default on GCE — IAM-controlled SSH, no project SSH keys | CC6.1 |
+| Workload Identity | GKE Autopilot default; pod SA → Google SA mapping | CC6.1 |
+| Private GKE nodes | `private_nodes=True` default (Standard mode) — no public IPs | CC6.6 |
+| Binary Authorization | `binary_authorization=True` on GKE enforces image signing | CC6.7 |
+| VPC Flow Logs | `enable_flow_logs=True` default on `add_subnet` | CC6.6, CC7.1 |
+| Cloud Audit Logs | `enable_audit_logs()` — DATA_READ/WRITE/ADMIN_READ for allServices | CC7.1, CC7.2 |
+| Cloud Armor WAF | `create_armor_policy()` — OWASP Top 10 + rate limit (10k req/min) | CC6.6 |
+| Least privilege | `create_service_account()` + `bind_iam_role()` for minimal grants | CC6.3 |
+| SA key rotation | `rotate_sa_key()` — creates new, deletes keys older than 90 days | CC6.2 |
+| Secret management | Secret Manager with CMEK + rotation schedule | CC6.7 |
+| Data residency | `region` param controls GCP region for all resources | HIPAA, GDPR |
+| Backup retention | Cloud SQL: `backup_retention` (automated backups) + PITR (max 7d) | HIPAA §164.312(c) |
+| Deletion protection | Cloud SQL: `deletion_protection=True` with HIPAA | HIPAA |
+| Vulnerability scanning | Artifact Registry: Container Analysis always enabled | CC7.2 |
+| No public bucket access | GCS uniform access blocks legacy ACLs | CC6.7 |
+| Private Google Access | Subnets: `private_google_access=True` by default | CC6.6 |
+| Cloud Run internal ingress | `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` by default | CC6.6 |
+| Firewall no implicit default | `source_ranges` must be explicit — no open-world default | CC6.6 |
 
-## Environment Variables
-
-| Variable | Purpose |
-|---|---|
-| `GOOGLE_CLOUD_PROJECT` | GCP project ID (required) |
-| `GOOGLE_CLOUD_REGION` | Default region (default: `us-central1`) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account key JSON |
-| `GCLOUD_PROJECT` | Alias for `GOOGLE_CLOUD_PROJECT` |

@@ -29,6 +29,13 @@ dependencies = [
     "google-cloud-artifact-registry>=1.11",
     "google-cloud-secret-manager>=2.20",
     "google-cloud-resource-manager>=1.12",
+    "google-cloud-asset>=3.19",
+    "google-cloud-discoveryengine>=0.11",
+    "google-cloud-run>=0.10",
+    "google-cloud-pubsub>=2.21",
+    "google-cloud-kms>=2.22",
+    "google-cloud-iam>=2.15",
+    "google-cloud-binary-authorization>=1.9",
 ]
 
 [project.urls]

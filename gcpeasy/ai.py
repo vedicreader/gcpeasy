@@ -6,7 +6,7 @@
 __all__ = ['list_models', 'generate_content', 'create_vector_search_index', 'create_vector_search_endpoint', 'create_search_app',
            'search_query']
 
-# %% ../nbs/01_ai.ipynb #0481b6a0
+# %% ../nbs/01_ai.ipynb #e8a430b1
 import json
 try:
     import vertexai
@@ -17,13 +17,13 @@ try:
 except ImportError:
     pass
 
-# %% ../nbs/01_ai.ipynb #8cccfe7e
+# %% ../nbs/01_ai.ipynb #4e8edbab
 def _init_vertexai(auth):
     """Initialise Vertex AI SDK with auth credentials."""
     vertexai.init(project=auth.project, location=auth.region,
                   credentials=auth.credentials)
 
-# %% ../nbs/01_ai.ipynb #9d6e96a4
+# %% ../nbs/01_ai.ipynb #27569ad0
 def list_models(auth) -> list:
     """List available Vertex AI generative model publishers."""
     _init_vertexai(auth)
@@ -52,7 +52,7 @@ def generate_content(
     )
     return response.text
 
-# %% ../nbs/01_ai.ipynb #cee9755b
+# %% ../nbs/01_ai.ipynb #ebb6aab5
 def create_vector_search_index(
     auth,
     name: str,
@@ -92,7 +92,7 @@ def create_vector_search_endpoint(
     )
     return {'name': ep.resource_name, 'display_name': name}
 
-# %% ../nbs/01_ai.ipynb #ca9f9add
+# %% ../nbs/01_ai.ipynb #3086c8e9
 def create_search_app(
     auth,
     name: str,
