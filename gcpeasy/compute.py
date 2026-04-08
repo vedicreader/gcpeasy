@@ -7,7 +7,7 @@ __all__ = ['create_instance', 'instance_ip', 'start_instance', 'stop_instance', 
            'gke_kubeconfig', 'scale_gke', 'create_artifact_registry', 'registry_url', 'attach_registry_to_gke',
            'deploy_cloudrun', 'create_binary_auth_policy']
 
-# %% ../nbs/03_compute.ipynb #b0cf3698
+# %% ../nbs/03_compute.ipynb #140a3f5d
 try:
     from google.cloud import compute_v1
     from google.cloud import container_v1
@@ -19,7 +19,7 @@ except ImportError:
     pass
 
 
-# %% ../nbs/03_compute.ipynb #1c1f2b61
+# %% ../nbs/03_compute.ipynb #ba16fb16
 def _latest_debian_image(auth, zone: str) -> str:
     """Return the latest Debian 12 image selfLink."""
     client = compute_v1.ImagesClient(credentials=auth.credentials)
@@ -137,7 +137,7 @@ def delete_instance(auth, name: str, zone: str = None):
     op.result()
 
 
-# %% ../nbs/03_compute.ipynb #b2f0acd9
+# %% ../nbs/03_compute.ipynb #a4d0eafb
 def create_gke_cluster(
     auth,
     name: str,
@@ -168,7 +168,7 @@ def create_gke_cluster(
         container_v1.WorkloadIdentityConfig(workload_pool=f'{auth.project}.svc.id.goog')
         if workload_identity else None
     )
-    binauth = (
+    binauth_config = (
         container_v1.BinaryAuthorization(
             evaluation_mode=container_v1.BinaryAuthorization.EvaluationMode.PROJECT_SINGLETON_POLICY_ENFORCE
         ) if binary_authorization else None
@@ -179,7 +179,7 @@ def create_gke_cluster(
             name=name,
             autopilot=container_v1.Autopilot(enabled=True),
             workload_identity_config=wi_config,
-            binary_authorization=binauth,
+            binary_authorization=binauth_config,
             resource_labels=labels or {},
         )
     else:
@@ -208,7 +208,7 @@ def create_gke_cluster(
             ],
             private_cluster_config=private_cfg,
             workload_identity_config=wi_config,
-            binary_authorization=binauth,
+            binary_authorization=binauth_config,
             resource_labels=labels or {},
         )
 
@@ -242,7 +242,7 @@ def scale_gke(auth, name: str, node_pool: str, node_count: int):
     return op.name
 
 
-# %% ../nbs/03_compute.ipynb #4e109025
+# %% ../nbs/03_compute.ipynb #9a896b62
 def create_artifact_registry(
     auth,
     name: str,
@@ -287,7 +287,7 @@ def attach_registry_to_gke(auth, registry_name: str, gke_sa_email: str):
     return {'registry': registry_name, 'sa': gke_sa_email, 'role': 'roles/artifactregistry.reader'}
 
 
-# %% ../nbs/03_compute.ipynb #58d75e93
+# %% ../nbs/03_compute.ipynb #cbb52f77
 def deploy_cloudrun(
     auth,
     name: str,

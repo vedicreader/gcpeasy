@@ -6,7 +6,7 @@
 __all__ = ['HIPAA', 'ISO27001', 'SOC2', 'GCPAuth', 'find_resources', 'list_resources', 'label_resources',
            'list_labeled_resources', 'GenAIStack']
 
-# %% ../nbs/00_core.ipynb #963a7161
+# %% ../nbs/00_core.ipynb #d2a47eeb
 import os
 from fastcore.basics import store_attr
 
@@ -18,7 +18,7 @@ except ImportError:
     pass  # optional at import time; raised at runtime if needed
 
 
-# %% ../nbs/00_core.ipynb #5936e212
+# %% ../nbs/00_core.ipynb #5f956e1e
 HIPAA = dict(
     encryption=True,
     tls_min='1.2',
@@ -46,7 +46,7 @@ SOC2 = dict(
     labels={'compliance': 'soc2'},
 )
 
-# %% ../nbs/00_core.ipynb #288b0835
+# %% ../nbs/00_core.ipynb #cd5a5076
 class GCPAuth:
     """Application Default Credentials wrapper for GCP. Reads `GOOGLE_CLOUD_PROJECT`
     and `GOOGLE_CLOUD_REGION` from env. Pass `service_account_file` for key-based auth."""
@@ -82,7 +82,7 @@ class GCPAuth:
         return f'GCPAuth(project={self.project!r}, region={self.region!r})'
 
 
-# %% ../nbs/00_core.ipynb #85b433e5
+# %% ../nbs/00_core.ipynb #ea7359b9
 def find_resources(auth, labels: dict) -> list:
     """List GCP project resources matching `labels` using Cloud Asset Inventory."""
     from google.cloud import asset_v1
@@ -111,7 +111,7 @@ def list_labeled_resources(auth) -> list:
     return list_resources(auth)
 
 
-# %% ../nbs/00_core.ipynb #87fa2493
+# %% ../nbs/00_core.ipynb #9552bc81
 class GenAIStack:
     """Provision a full enterprise GenAI stack on GCP in one call."""
 
@@ -139,7 +139,7 @@ class GenAIStack:
 
         name = self.name
         co = self._compliance
-        labels = {**co.get('labels', {}), 'gcpeasy': name}  # copy, not mutate
+        labels = {**co.get('labels', {}), 'gcpeasy': name}  # new dict — do not mutate compliance profile
 
         # Audit logging (activated when compliance profile has audit=True)
         if co.get('audit'):
