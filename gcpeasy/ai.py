@@ -23,7 +23,15 @@ except ImportError:
 
 # %% ../nbs/01_ai.ipynb #8cccfe7e
 def _genai_client(auth):
-    """Return a configured google-genai Client for Agent Platform (Vertex AI)."""
+    """Return a configured google-genai Client for Agent Platform (Vertex AI).
+
+    Uses ``GOOGLE_CLOUD_LOCATION`` (default ``'global'``) rather than
+    ``auth.region`` because the Agent Platform global endpoint provides
+    automatic routing to the nearest available region — this is the recommended
+    default per the google/skills ``gemini-api`` skill.  Override with
+    ``GOOGLE_CLOUD_LOCATION=us-central1`` if a specific region is required
+    (e.g. for data residency constraints).
+    """
     return genai.Client(
         vertexai=True,
         project=auth.project,
