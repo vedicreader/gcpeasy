@@ -4,13 +4,19 @@
 
 # %% auto #0
 __all__ = ['create_instance', 'instance_ip', 'start_instance', 'stop_instance', 'delete_instance', 'create_gke_cluster',
-           'gke_kubeconfig', 'scale_gke', 'create_artifact_registry', 'registry_url', 'attach_registry_to_gke']
+           'gke_kubeconfig', 'scale_gke', 'create_artifact_registry', 'registry_url', 'attach_registry_to_gke',
+           'deploy_cloudrun', 'cloudrun_url']
 
 # %% ../nbs/03_compute.ipynb #066ed635
 try:
     from google.cloud import compute_v1
     from google.cloud import container_v1
     from google.cloud import artifactregistry_v1
+except ImportError:
+    pass
+
+try:
+    from google.cloud import run_v2
 except ImportError:
     pass
 
@@ -247,3 +253,96 @@ def attach_registry_to_gke(auth, registry_name: str, gke_sa_email: str):
     from gcpeasy.network import bind_iam_role
     bind_iam_role(auth, gke_sa_email, 'roles/artifactregistry.reader')
     return {'registry': registry_name, 'sa': gke_sa_email, 'role': 'roles/artifactregistry.reader'}
+
+# %% ../nbs/03_compute.ipynb #cloudrun
+def deploy_cloudrun(
+    auth,
+    name: str,
+    image: str,
+    service_account: str = None,
+    env_vars: dict = None,
+    concurrency: int = 80,
+    allow_unauthenticated: bool = False,
+    vpc_connector: str = None,
+    min_instances: int = 0,
+    max_instances: int = 10,
+    **compliance_opts,
+) -> dict:
+    """Deploy or update a Cloud Run service.
+
+    Security defaults aligned with the Well-Architected Framework:
+
+    - ``allow_unauthenticated=False`` — all requests must carry a valid OIDC
+      token or pass through IAP; prevents accidental public exposure.
+    - Custom ``service_account`` is recommended; omitting it falls back to
+      the Compute Engine default SA which has broad project-level permissions.
+    - The container must listen on ``$PORT`` (Cloud Run injects this; defaults
+      to 8080).  The port is exposed as 8080 in the revision template.
+    - Optionally route all egress through a Serverless VPC connector by passing
+      ``vpc_connector`` (full resource name or connector ID).
+
+    Returns a dict with ``name`` (full resource path) and ``uri`` (HTTPS URL).
+    """
+    client = run_v2.ServicesClient(credentials=auth.credentials)
+    parent = f'projects/{auth.project}/locations/{auth.region}'
+    service_name = f'{parent}/services/{name}'
+
+    env = [run_v2.EnvVar(name=k, value=v) for k, v in (env_vars or {}).items()]
+    container = run_v2.Container(
+        image=image,
+        env=env,
+        ports=[run_v2.ContainerPort(container_port=8080)],
+    )
+    template = run_v2.RevisionTemplate(
+        containers=[container],
+        service_account=service_account or '',
+        max_instance_request_concurrency=concurrency,
+        scaling=run_v2.RevisionScaling(
+            min_instance_count=min_instances,
+            max_instance_count=max_instances,
+        ),
+    )
+    if vpc_connector:
+        template.vpc_access = run_v2.VpcAccess(
+            connector=vpc_connector,
+            egress=run_v2.VpcAccess.VpcEgress.ALL_TRAFFIC,
+        )
+
+    service = run_v2.Service(template=template)
+
+    try:
+        client.get_service(name=service_name)
+        service.name = service_name
+        op = client.update_service(service=service)
+    except Exception:
+        op = client.create_service(parent=parent, service=service, service_id=name)
+
+    result = op.result(timeout=300)
+
+    if allow_unauthenticated:
+        from google.iam.v1 import iam_policy_pb2, policy_pb2
+        client.set_iam_policy(
+            request=iam_policy_pb2.SetIamPolicyRequest(
+                resource=result.name,
+                policy=policy_pb2.Policy(
+                    bindings=[
+                        policy_pb2.Binding(
+                            role='roles/run.invoker',
+                            members=['allUsers'],
+                        )
+                    ]
+                ),
+            )
+        )
+
+    return {'name': result.name, 'uri': result.uri}
+
+
+def cloudrun_url(auth, name: str) -> str:
+    "Return the HTTPS URL of a deployed Cloud Run service."
+    client = run_v2.ServicesClient(credentials=auth.credentials)
+    service = client.get_service(
+        name=f'projects/{auth.project}/locations/{auth.region}/services/{name}'
+    )
+    return service.uri
+

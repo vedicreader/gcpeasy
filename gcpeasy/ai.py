@@ -7,10 +7,14 @@ __all__ = ['list_models', 'generate_content', 'create_vector_search_index', 'cre
            'search_query']
 
 # %% ../nbs/01_ai.ipynb #0481b6a0
-import json
+import os
 try:
-    import vertexai
-    from vertexai.generative_models import GenerativeModel, Part
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    pass
+
+try:
     from google.cloud import aiplatform
     from google.cloud.aiplatform import MatchingEngineIndex, MatchingEngineIndexEndpoint
     from google.cloud import discoveryengine_v1 as discoveryengine
@@ -18,37 +22,57 @@ except ImportError:
     pass
 
 # %% ../nbs/01_ai.ipynb #8cccfe7e
-def _init_vertexai(auth):
-    """Initialise Vertex AI SDK with auth credentials."""
-    vertexai.init(project=auth.project, location=auth.region,
-                  credentials=auth.credentials)
+def _genai_client(auth):
+    """Return a configured google-genai Client for Agent Platform (Vertex AI)."""
+    return genai.Client(
+        vertexai=True,
+        project=auth.project,
+        location=os.environ.get('GOOGLE_CLOUD_LOCATION', 'global'),
+        credentials=auth.credentials,
+    )
 
 # %% ../nbs/01_ai.ipynb #9d6e96a4
 def list_models(auth) -> list:
-    """List available Vertex AI generative model publishers."""
-    _init_vertexai(auth)
-    # Returns well-known Gemini model IDs
+    """List current Gemini model IDs available on Agent Platform (Vertex AI)."""
     return [
-        'gemini-1.5-pro',
-        'gemini-1.5-flash',
-        'gemini-2.0-flash-exp',
-        'text-embedding-004',
+        'gemini-3.1-pro-preview',
+        'gemini-3-flash-preview',
+        'gemini-2.5-pro',
+        'gemini-2.5-flash',
+        'text-embedding-005',
     ]
 
 
 def generate_content(
     auth,
     prompt: str,
-    model: str = 'gemini-1.5-pro',
+    model: str = 'gemini-3-flash-preview',
     max_tokens: int = 1024,
+    safety_settings: dict = None,
     **_,
 ) -> str:
-    """Generate a text response from a Vertex AI Gemini model."""
-    _init_vertexai(auth)
-    m = GenerativeModel(model)
-    response = m.generate_content(
-        prompt,
-        generation_config={'max_output_tokens': max_tokens},
+    """Generate a text response via the google-genai SDK on Agent Platform.
+
+    Uses the unified `google-genai` SDK (not the deprecated `vertexai` SDK).
+    Set ``GOOGLE_CLOUD_LOCATION=global`` (default) for automatic regional routing.
+
+    Pass ``safety_settings`` as a dict mapping
+    ``google.genai.types.HarmCategory`` to ``HarmBlockThreshold``, e.g.::
+
+        from google.genai import types
+        safety_settings = {
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH:
+                types.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
+        }
+    """
+    client = _genai_client(auth)
+    config_kwargs = {'max_output_tokens': max_tokens}
+    if safety_settings:
+        config_kwargs['safety_settings'] = safety_settings
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(**config_kwargs),
     )
     return response.text
 
