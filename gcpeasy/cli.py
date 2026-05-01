@@ -144,7 +144,7 @@ def cmd_run_deploy(args) -> int:
     secrets = {}
     for spec in args.secret or []:
         if '=' not in spec:
-            print(f'invalid --secret {spec!r}, expected KEY=secret-ref', file=sys.stderr)
+            print('invalid --secret value: expected KEY=secret-ref', file=sys.stderr)
             return 2
         k, v = spec.split('=', 1)
         secrets[k] = v
