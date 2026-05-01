@@ -1,0 +1,180 @@
+"""Internal helpers: progress waits, error translation, IAM etag-aware updates."""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from typing import Any, Callable, Iterable
+
+# ---------------------------------------------------------------------------
+# Progress / wait helper
+# ---------------------------------------------------------------------------
+
+def _log(msg: str) -> None:
+    """Emit a single-line progress message to stderr (suppressible via env)."""
+    if os.environ.get('GCPEASY_QUIET'):
+        return
+    sys.stderr.write(f'[gcpeasy] {msg}\n')
+    sys.stderr.flush()
+
+
+def wait_op(op, what: str, timeout: int = 600, poll: float = 5.0):
+    """Wait for a google-api-core long-running ``Operation`` with progress.
+
+    Works for both ``google.api_core.operation.Operation`` (gRPC) and the
+    ``google-api-python-client`` REST operations object.  When ``op`` is
+    already a result object (no ``result`` method) it is returned as-is.
+    """
+    start = time.monotonic()
+    if hasattr(op, 'result') and callable(op.result):
+        deadline = start + timeout
+        last_log = 0.0
+        while True:
+            if hasattr(op, 'done') and op.done():
+                break
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            if now - last_log >= 30:
+                _log(f'{what}: waiting ({int(now - start)}s)')
+                last_log = now
+            time.sleep(poll)
+        try:
+            result = op.result(timeout=max(1, int(deadline - time.monotonic())))
+        except Exception as e:  # pragma: no cover - re-raised after translation
+            raise translate_error(e, what)
+        _log(f'{what}: done ({int(time.monotonic() - start)}s)')
+        return result
+    return op
+
+
+def wait_rest_op(compute, project: str, op: dict, what: str, timeout: int = 600,
+                 region: str = None, zone: str = None):
+    """Wait for a REST ``compute`` API operation (global/regional/zonal)."""
+    name = op.get('name') if isinstance(op, dict) else op
+    start = time.monotonic()
+    while True:
+        if zone:
+            done = compute.zoneOperations().get(project=project, zone=zone, operation=name).execute()
+        elif region:
+            done = compute.regionOperations().get(project=project, region=region, operation=name).execute()
+        else:
+            done = compute.globalOperations().get(project=project, operation=name).execute()
+        if done.get('status') == 'DONE':
+            if 'error' in done:
+                raise RuntimeError(f'{what} failed: {done["error"]}')
+            _log(f'{what}: done ({int(time.monotonic() - start)}s)')
+            return done
+        if time.monotonic() - start > timeout:
+            raise TimeoutError(f'{what}: timed out after {timeout}s')
+        if int(time.monotonic() - start) % 30 == 0:
+            _log(f'{what}: {done.get("status", "PENDING")} ({int(time.monotonic() - start)}s)')
+        time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
+# Error translation
+# ---------------------------------------------------------------------------
+
+_REMEDIATION = {
+    'SERVICE_DISABLED':
+        'Run `gcpeasy enable-apis` (or call gcpeasy.core.enable_apis) for this project.',
+    'PERMISSION_DENIED':
+        'Caller is missing IAM permissions; check `gcloud projects get-iam-policy <project>`.',
+    'BILLING_DISABLED':
+        'Enable billing on the project: https://console.cloud.google.com/billing',
+}
+
+
+class GcpEasyError(RuntimeError):
+    """Wrapped GCP error with a human-readable remediation hint."""
+
+
+def translate_error(exc: BaseException, context: str = '') -> BaseException:
+    """Wrap common GCP errors with remediation hints; pass-through otherwise."""
+    msg = str(exc)
+    upper = msg.upper()
+    for token, hint in _REMEDIATION.items():
+        if token in upper:
+            return GcpEasyError(f'{context or type(exc).__name__}: {msg}\n  -> {hint}')
+    return exc
+
+
+def with_translation(fn: Callable, what: str = '') -> Callable:
+    """Decorator returning a callable that re-raises errors with remediation."""
+    def _wrap(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:  # noqa: BLE001
+            translated = translate_error(e, what or fn.__name__)
+            if translated is e:
+                raise
+            raise translated from e
+    return _wrap
+
+
+# ---------------------------------------------------------------------------
+# IAM read-modify-write with etag + retry
+# ---------------------------------------------------------------------------
+
+def update_iam_policy(crm, resource: str, mutate: Callable[[dict], bool],
+                      max_retries: int = 3) -> dict:
+    """Read project IAM policy v3 (with etag), apply ``mutate``, write back.
+
+    ``mutate(policy)`` should mutate ``policy`` in place and return ``True``
+    when a write is needed (returns ``False`` for no-op).  Retries up to
+    ``max_retries`` times on 409 (concurrent modification).
+    """
+    last_exc = None
+    for attempt in range(max_retries):
+        policy = crm.projects().getIamPolicy(
+            resource=resource,
+            body={'options': {'requestedPolicyVersion': 3}},
+        ).execute()
+        changed = mutate(policy)
+        if not changed:
+            return policy
+        policy['version'] = 3
+        try:
+            return crm.projects().setIamPolicy(
+                resource=resource, body={'policy': policy}
+            ).execute()
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if '409' in str(e) or 'aborted' in str(e).lower():
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            raise
+    if last_exc:
+        raise last_exc  # pragma: no cover
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+
+def labels_merge(*sources: dict) -> dict:
+    """Merge label dicts, later sources winning; drops ``None``/empty values."""
+    out: dict = {}
+    for s in sources:
+        if not s:
+            continue
+        for k, v in s.items():
+            if v is None or v == '':
+                continue
+            out[str(k)] = str(v)
+    return out
+
+
+def chunked(seq: Iterable[Any], n: int) -> Iterable[list]:
+    """Yield successive ``n``-sized chunks from ``seq``."""
+    buf: list = []
+    for x in seq:
+        buf.append(x)
+        if len(buf) == n:
+            yield buf
+            buf = []
+    if buf:
+        yield buf

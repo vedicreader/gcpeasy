@@ -40,21 +40,44 @@ def _genai_client(auth):
     )
 
 # %% ../nbs/01_ai.ipynb #9d6e96a4
+#: Curated fallback list of Gemini models known to be available on Vertex AI
+#: at time of writing.  ``list_models`` will try a live SDK call first and
+#: fall back to this list on any error (offline tests, missing API perms, …).
+_FALLBACK_MODELS = [
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+    'text-embedding-005',
+    'text-embedding-004',
+]
+
+
 def list_models(auth) -> list:
-    """List current Gemini model IDs available on Agent Platform (Vertex AI)."""
-    return [
-        'gemini-3.1-pro-preview',
-        'gemini-3-flash-preview',
-        'gemini-2.5-pro',
-        'gemini-2.5-flash',
-        'text-embedding-005',
-    ]
+    """List Gemini model IDs available on Agent Platform (Vertex AI).
+
+    Attempts a live ``client.models.list()`` call; falls back to a curated
+    list of models known to exist if the SDK call fails (e.g. offline tests
+    or missing API enablement).
+    """
+    try:
+        client = _genai_client(auth)
+        ids = []
+        for m in client.models.list():
+            mid = getattr(m, 'name', None) or getattr(m, 'model', None)
+            if not mid:
+                continue
+            ids.append(mid.rsplit('/', 1)[-1])
+        return ids or list(_FALLBACK_MODELS)
+    except Exception:
+        return list(_FALLBACK_MODELS)
 
 
 def generate_content(
     auth,
     prompt: str,
-    model: str = 'gemini-3-flash-preview',
+    model: str = 'gemini-2.5-flash',
     max_tokens: int = 1024,
     safety_settings: dict = None,
     **_,
@@ -92,19 +115,42 @@ def create_vector_search_index(
     approximate_neighbors: int = 150,
     distance_measure: str = 'DOT_PRODUCT_DISTANCE',
     labels: dict = None,
+    wait: bool = True,
     **_,
 ) -> dict:
-    """Create a Vertex AI Vector Search (Matching Engine) index."""
+    """Create a Vertex AI Vector Search (Matching Engine) index.
+
+    Index creation is a long-running op (typically 20–40 minutes).  Pass
+    ``wait=False`` to return immediately with a handle once the LRO has
+    been submitted, and poll separately.
+    """
     aiplatform.init(project=auth.project, location=auth.region,
                     credentials=auth.credentials)
+    if wait:
+        idx = MatchingEngineIndex.create_tree_ah_index(
+            display_name=name,
+            dimensions=dimensions,
+            approximate_neighbors_count=approximate_neighbors,
+            distance_measure_type=distance_measure,
+            labels=labels or {},
+        )
+        return {'name': idx.resource_name, 'display_name': name, 'status': 'ready'}
+    # Async path: submit the LRO and return.  ``sync=False`` is the SDK flag
+    # that makes the call non-blocking; the returned object exposes
+    # ``.resource_name`` once available.
     idx = MatchingEngineIndex.create_tree_ah_index(
         display_name=name,
         dimensions=dimensions,
         approximate_neighbors_count=approximate_neighbors,
         distance_measure_type=distance_measure,
         labels=labels or {},
+        sync=False,
     )
-    return {'name': idx.resource_name, 'display_name': name}
+    return {
+        'name': getattr(idx, 'resource_name', None) or '',
+        'display_name': name,
+        'status': 'pending',
+    }
 
 
 def create_vector_search_endpoint(
