@@ -213,6 +213,18 @@ __all__ = ['create_vpc', 'add_subnet', 'create_firewall_rule',
 - [x] `nbs/index.ipynb` — README + usage examples
 - [x] `nbdev_export` — generate all `.py` files
 - [x] `README.md` + `PLAN.md`
+- [x] **Secure GenAI Webapps gap remediation** (google/skills audit):
+  - [x] Migrate `generate_content` to `google-genai` SDK (deprecated `vertexai` removed)
+  - [x] Add `safety_settings` parameter to `generate_content()`
+  - [x] Update model IDs to current Agent Platform models (`gemini-3-flash-preview`, etc.)
+  - [x] `deploy_cloudrun()` + `cloudrun_url()` — primary GenAI webapp serving pattern
+  - [x] `create_armor_policy()` — Cloud Armor WAF/DDoS protection
+  - [x] `create_managed_cert()` — Google-managed SSL; wired into `create_https_lb()`
+  - [x] `enable_iap()` — Zero Trust identity layer for web apps
+  - [x] `get_oidc_token()` — service-to-service OIDC token helper
+  - [x] `enable_data_access_audit()` — wire `audit=True` compliance flag to actual audit log config
+  - [x] `create_vpc_sc_perimeter()` — VPC Service Controls for GenAI data exfiltration prevention
+  - [x] Add `google-genai`, `google-cloud-run`, `google-cloud-access-context-manager` deps
 
 ---
 
@@ -222,10 +234,10 @@ __all__ = ['create_vpc', 'add_subnet', 'create_firewall_rule',
 
 - [ ] **`GenAIStack.provision(gke=True)`** — full GKE Autopilot cluster provisioning
 - [ ] **`GenAIStack.provision(cloud_sql=True)`** — Cloud SQL in the stack flow
-- [ ] **Cloud Armor policy creation** — `create_armor_policy(auth, name, rules)` helper
-- [ ] **Managed SSL certs** — `create_managed_cert(auth, name, domains)` for HTTPS LB
-- [ ] **VPC Service Controls** — perimeter creation for HIPAA data isolation
-- [ ] **Cloud Run** — `deploy_cloudrun(auth, name, image, ...)` for serverless containers
+- [x] **Cloud Armor policy creation** — `create_armor_policy(auth, name, rules)` ✓
+- [x] **Managed SSL certs** — `create_managed_cert(auth, name, domains)` ✓
+- [ ] **VPC Service Controls** — perimeter creation for HIPAA data isolation ✓ (`create_vpc_sc_perimeter`)
+- [x] **Cloud Run** — `deploy_cloudrun(auth, name, image, ...)` for serverless containers ✓
 - [ ] **Pub/Sub** — `create_topic()` / `create_subscription()` for event-driven GenAI
 - [ ] **BigQuery** — `create_dataset()` / `create_table()` for analytics layer
 

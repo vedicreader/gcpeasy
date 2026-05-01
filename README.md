@@ -252,6 +252,74 @@ lb = create_https_lb(auth, 'app-lb',
 | Secret management | Secret Manager; `get_secret()` returns string, never logged |
 | Idempotent operations | All `create_*` use create-or-return semantics |
 | Compliance profiles | HIPAA / ISO27001 / SOC2 as composable `**kwargs` |
+| Audit logging | `enable_data_access_audit()` wired into `GenAIStack` when `audit=True` |
+| Cloud Armor / WAF | `create_armor_policy()` + `create_https_lb(armor_policy=...)` |
+| Managed SSL certs | `create_managed_cert()` → zero certificate management toil |
+| Zero Trust (IAP) | `enable_iap()` — verify identity before requests reach the app |
+| OIDC tokens | `get_oidc_token()` for secure service-to-service calls |
+| Data exfiltration | `create_vpc_sc_perimeter()` restricts GenAI service-plane API calls |
+| Cloud Run defaults | `deploy_cloudrun(allow_unauthenticated=False)` — authenticated by default |
+
+## Secure GenAI Webapp Pattern
+
+The recommended stack for a production GenAI webapp on GCP:
+
+```
+Internet → Cloud Armor (WAF/DDoS) → HTTPS LB (Managed SSL) → IAP → Cloud Run → Vertex AI
+                                                                         ↓
+                                                               Secret Manager / GCS / Firestore
+```
+
+```python
+from gcpeasy.core import GCPAuth, GenAIStack, HIPAA
+from gcpeasy.network import (
+    create_armor_policy, create_managed_cert,
+    create_https_lb, enable_iap, get_secret,
+)
+from gcpeasy.compute import deploy_cloudrun
+
+auth = GCPAuth(project='my-project')
+
+# 1. Provision the data + AI infrastructure (audit logging auto-enabled via HIPAA)
+stack = GenAIStack(auth, 'myapp', compliance=HIPAA)
+resources = stack.provision()
+
+# 2. Deploy the GenAI webapp on Cloud Run (authenticated only, custom SA)
+service = deploy_cloudrun(
+    auth, 'myapp-api',
+    image='us-central1-docker.pkg.dev/my-project/myapp/api:latest',
+    service_account=resources['service_account'],
+    env_vars={'PROJECT_ID': auth.project},
+    allow_unauthenticated=False,   # enforced by default
+)
+
+# 3. Cloud Armor: block SQLi / XSS + rate-limit
+armor = create_armor_policy(auth, 'myapp-armor', rules=[
+    {'priority': 1000, 'action': 'deny(403)',
+     'match': {'expr': {'expression': 'evaluatePreconfiguredExpr("sqli-stable")'}},
+     'description': 'Block SQLi'},
+    {'priority': 2147483647, 'action': 'allow',
+     'match': {'versionedExpr': 'SRC_IPS_V1', 'config': {'srcIpRanges': ['*']}},
+     'description': 'default allow'},
+])
+
+# 4. Managed SSL cert + HTTPS LB
+cert = create_managed_cert(auth, 'myapp-cert', domains=['api.myapp.example.com'])
+lb = create_https_lb(
+    auth, 'myapp-lb',
+    backend_service='global/backendServices/myapp-backend',
+    armor_policy=armor['self_link'],
+    ssl_certificates=[cert['self_link']],
+)
+
+# 5. Enable IAP (zero-trust: only authorized users reach Cloud Run)
+iap_secret = get_secret(auth, 'myapp/iap-client-secret')
+enable_iap(auth, 'myapp-backend',
+           iap_client_id='YOUR_OAUTH_CLIENT_ID',
+           iap_client_secret=iap_secret)
+
+print(stack.summary())
+```
 
 ## Environment Variables
 
@@ -259,5 +327,8 @@ lb = create_https_lb(auth, 'app-lb',
 |---|---|
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID (required) |
 | `GOOGLE_CLOUD_REGION` | Default region (default: `us-central1`) |
+| `GOOGLE_CLOUD_LOCATION` | Gemini API location (default: `global` for automatic routing) |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Set to `true` to use Agent Platform (Vertex AI) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account key JSON |
 | `GCLOUD_PROJECT` | Alias for `GOOGLE_CLOUD_PROJECT` |
+

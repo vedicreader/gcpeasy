@@ -5,7 +5,8 @@
 # %% auto #0
 __all__ = ['create_vpc', 'add_subnet', 'create_firewall_rule', 'create_secret', 'get_secret', 'update_secret', 'secret_name',
            'create_service_account', 'bind_iam_role', 'sa_email', 'create_private_service_connect',
-           'create_cdn_backend', 'create_https_lb']
+           'create_cdn_backend', 'create_https_lb', 'create_armor_policy', 'create_managed_cert',
+           'enable_iap', 'get_oidc_token', 'create_vpc_sc_perimeter']
 
 # %% ../nbs/04_network.ipynb #3254b5c9
 try:
@@ -314,12 +315,17 @@ def create_https_lb(
     name: str,
     backend_service: str,
     armor_policy: str = None,
+    ssl_certificates: list = None,
     **_,
 ) -> dict:
-    """Create a global HTTPS load balancer with optional Cloud Armor security policy.
+    """Create a global HTTPS load balancer with optional Cloud Armor and managed SSL certs.
 
     Creates: URL map → target HTTPS proxy → global forwarding rule.
-    Pass `armor_policy` as the full resource URL of a Cloud Armor security policy.
+
+    - ``armor_policy``: full resource URL of a Cloud Armor policy (from
+      :func:`create_armor_policy`).
+    - ``ssl_certificates``: list of full ``selfLink`` URLs of SSL certificates
+      to attach (from :func:`create_managed_cert`).
     """
     compute = googleapiclient.discovery.build(
         'compute', 'v1', credentials=auth.credentials
@@ -336,7 +342,7 @@ def create_https_lb(
             'defaultService': backend_service,
         }).execute()
 
-    # HTTPS proxy (requires SSL cert — omitted here for brevity; use managed cert)
+    # HTTPS proxy
     proxy_name = f'{name}-https-proxy'
     try:
         compute.targetHttpsProxies().get(project=project,
@@ -345,7 +351,7 @@ def create_https_lb(
         compute.targetHttpsProxies().insert(project=project, body={
             'name': proxy_name,
             'urlMap': f'global/urlMaps/{url_map_name}',
-            'sslCertificates': [],  # attach managed cert separately
+            'sslCertificates': ssl_certificates or [],
         }).execute()
 
     # Global forwarding rule
@@ -369,3 +375,216 @@ def create_https_lb(
         body['securityPolicy'] = armor_policy
     op = compute.globalForwardingRules().insert(project=project, body=body).execute()
     return {'name': fr_name, 'operation': op.get('name')}
+
+# %% ../nbs/04_network.ipynb #armor_policy
+def create_armor_policy(
+    auth,
+    name: str,
+    rules: list = None,
+    **_,
+) -> dict:
+    """Create a Cloud Armor security policy for DDoS protection and WAF rules.
+
+    ``rules`` is a list of Cloud Armor rule dicts. Each rule must include
+    ``priority``, ``action``, ``match``, and an optional ``description``.
+    When omitted, a sensible default is created: a catch-all ``allow`` rule
+    (priority 2147483647) that can be supplemented with deny/rate-limit rules.
+
+    The returned ``self_link`` can be passed directly to
+    :func:`create_https_lb` as the ``armor_policy`` argument.
+    """
+    compute = googleapiclient.discovery.build('compute', 'v1', credentials=auth.credentials)
+    project = auth.project
+
+    try:
+        existing = compute.securityPolicies().get(
+            project=project, securityPolicy=name
+        ).execute()
+        return {'name': name, 'self_link': existing['selfLink']}
+    except Exception:
+        pass
+
+    default_rules = [
+        {
+            'priority': 2147483647,
+            'action': 'allow',
+            'match': {
+                'versionedExpr': 'SRC_IPS_V1',
+                'config': {'srcIpRanges': ['*']},
+            },
+            'description': 'default allow rule',
+        }
+    ]
+    body = {'name': name, 'rules': rules or default_rules}
+    op = compute.securityPolicies().insert(project=project, body=body).execute()
+    compute.globalOperations().wait(project=project, operation=op['name']).execute()
+    policy = compute.securityPolicies().get(project=project, securityPolicy=name).execute()
+    return {'name': name, 'self_link': policy['selfLink']}
+
+
+# %% ../nbs/04_network.ipynb #managed_cert
+def create_managed_cert(
+    auth,
+    name: str,
+    domains: list,
+    **_,
+) -> dict:
+    """Create a Google-managed SSL certificate for the given domains.
+
+    Provisioning is asynchronous — the certificate moves to ``ACTIVE`` status
+    once DNS for all ``domains`` points to the load balancer IP.
+
+    The returned ``self_link`` can be passed in the ``ssl_certificates`` list
+    to :func:`create_https_lb`.
+    """
+    compute = googleapiclient.discovery.build('compute', 'v1', credentials=auth.credentials)
+    project = auth.project
+
+    try:
+        existing = compute.sslCertificates().get(
+            project=project, sslCertificate=name
+        ).execute()
+        return {'name': name, 'self_link': existing['selfLink']}
+    except Exception:
+        pass
+
+    body = {'name': name, 'managed': {'domains': domains}, 'type': 'MANAGED'}
+    op = compute.sslCertificates().insert(project=project, body=body).execute()
+    compute.globalOperations().wait(project=project, operation=op['name']).execute()
+    cert = compute.sslCertificates().get(project=project, sslCertificate=name).execute()
+    return {'name': name, 'self_link': cert['selfLink']}
+
+
+# %% ../nbs/04_network.ipynb #iap
+def enable_iap(
+    auth,
+    backend_service_name: str,
+    iap_client_id: str,
+    iap_client_secret: str,
+    **_,
+) -> dict:
+    """Enable Identity-Aware Proxy (IAP) on a global backend service.
+
+    IAP enforces zero-trust access control: only authenticated principals with
+    ``roles/iap.httpsResourceAccessor`` can reach the backend. It replaces VPN
+    for internal applications and protects customer-facing GenAI webapps.
+
+    ``iap_client_id`` / ``iap_client_secret`` must come from an OAuth 2.0
+    client created in Cloud Console → APIs & Services → Credentials (type:
+    *Web application*). Store the secret in Secret Manager and retrieve it
+    with :func:`get_secret` — never pass it as a literal string in production.
+
+    After enabling IAP, grant access with::
+
+        bind_iam_role(auth, 'user@example.com',
+                      'roles/iap.httpsResourceAccessor', member_type='user')
+    """
+    compute = googleapiclient.discovery.build('compute', 'v1', credentials=auth.credentials)
+    project = auth.project
+
+    backend = compute.backendServices().get(
+        project=project, backendService=backend_service_name
+    ).execute()
+    backend['iap'] = {
+        'enabled': True,
+        'oauth2ClientId': iap_client_id,
+        'oauth2ClientSecret': iap_client_secret,
+    }
+    op = compute.backendServices().update(
+        project=project,
+        backendService=backend_service_name,
+        body=backend,
+    ).execute()
+    compute.globalOperations().wait(project=project, operation=op['name']).execute()
+    return {'backend_service': backend_service_name, 'iap_enabled': True}
+
+
+# %% ../nbs/04_network.ipynb #oidc_token
+def get_oidc_token(auth, target_audience: str) -> str:
+    """Fetch a short-lived OIDC ID token for service-to-service authentication.
+
+    Use this when a Cloud Run service (or any caller) needs to call another
+    private Cloud Run service or IAP-protected endpoint.  Pass the URL of the
+    target service as ``target_audience``.
+
+    Include the returned token in the ``Authorization`` header::
+
+        headers = {'Authorization': f'Bearer {get_oidc_token(auth, url)}'}
+
+    The token is signed by Google and expires in 1 hour.
+    """
+    from google.auth.transport.requests import Request
+    from google.oauth2 import id_token as _id_token
+    return _id_token.fetch_id_token(Request(), target_audience)
+
+
+# %% ../nbs/04_network.ipynb #vpc_sc
+def create_vpc_sc_perimeter(
+    auth,
+    policy_resource: str,
+    perimeter_name: str,
+    restricted_services: list = None,
+    access_levels: list = None,
+    **_,
+) -> dict:
+    """Create a VPC Service Controls service perimeter to prevent data exfiltration.
+
+    VPC Service Controls wrap GCP services in a security perimeter — API calls
+    from outside the perimeter are denied even with valid IAM credentials.  This
+    is the primary control recommended by the Well-Architected Framework (Zero
+    Trust checklist) to prevent data exfiltration from GenAI pipelines.
+
+    ``policy_resource`` is the Access Context Manager policy name, e.g.
+    ``accessPolicies/123456789``.  Retrieve your org's policy ID with::
+
+        gcloud access-context-manager policies list --organization=ORG_ID
+
+    ``restricted_services`` defaults to the core GenAI data-plane services::
+
+        ['aiplatform.googleapis.com', 'storage.googleapis.com',
+         'bigquery.googleapis.com', 'secretmanager.googleapis.com']
+
+    ``access_levels`` are full resource names of existing access levels to
+    attach (optional).  Returns immediately if the perimeter already exists.
+
+    Requires ``accesscontextmanager.googleapis.com`` enabled and the caller to
+    have ``roles/accesscontextmanager.policyAdmin`` on the policy.
+    """
+    try:
+        from google.cloud import accesscontextmanager_v1
+    except ImportError:
+        raise ImportError(
+            'Install google-cloud-access-context-manager: '
+            'pip install google-cloud-access-context-manager'
+        )
+
+    acm = accesscontextmanager_v1.AccessContextManagerClient(credentials=auth.credentials)
+    perimeter_resource = f'{policy_resource}/servicePerimeters/{perimeter_name}'
+
+    try:
+        existing = acm.get_service_perimeter(name=perimeter_resource)
+        return {'name': existing.name, 'title': existing.title}
+    except Exception:
+        pass
+
+    _default_services = [
+        'aiplatform.googleapis.com',
+        'storage.googleapis.com',
+        'bigquery.googleapis.com',
+        'secretmanager.googleapis.com',
+    ]
+    perimeter = accesscontextmanager_v1.ServicePerimeter(
+        name=perimeter_resource,
+        title=perimeter_name,
+        perimeter_type=(
+            accesscontextmanager_v1.ServicePerimeter.PerimeterType.PERIMETER_TYPE_REGULAR
+        ),
+        status=accesscontextmanager_v1.ServicePerimeterConfig(
+            resources=[f'projects/{auth.project}'],
+            restricted_services=restricted_services or _default_services,
+            access_levels=access_levels or [],
+        ),
+    )
+    op = acm.create_service_perimeter(parent=policy_resource, service_perimeter=perimeter)
+    result = op.result(timeout=120)
+    return {'name': result.name, 'title': perimeter_name}
