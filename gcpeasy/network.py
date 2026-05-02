@@ -11,9 +11,7 @@ __all__ = ['IAP_SSH_RANGE', 'IAP_TCP_RANGES', 'GFE_RANGES', 'create_vpc', 'add_s
            'create_managed_cert', 'wait_managed_cert_active', 'get_or_create_oauth_brand', 'enable_iap',
            'get_oidc_token', 'create_vpc_sc_perimeter', 'create_dns_zone', 'cloud_dns_record']
 
-# %% ../nbs/04_network.ipynb #75e1c335
-# Hand-edited; not nbdev-generated. See PLAN.md note.
-
+# %% ../nbs/04_network.ipynb #584951ac
 import time
 from gcpeasy._util import (
     _log, translate_error, update_iam_policy, wait_op, wait_rest_op,
@@ -32,7 +30,7 @@ try:
 except ImportError:
     pass
 
-# %% ../nbs/04_network.ipynb #8d20ee7e
+# %% ../nbs/04_network.ipynb #dfd340da
 #: GCP IAP TCP forwarding source range (used for IAP-tunneled SSH/RDP).
 IAP_SSH_RANGE = '35.235.240.0/20'
 IAP_TCP_RANGES = [IAP_SSH_RANGE]
@@ -40,7 +38,7 @@ IAP_TCP_RANGES = [IAP_SSH_RANGE]
 #: GCP load balancer / health-checker source ranges.
 GFE_RANGES = ['130.211.0.0/22', '35.191.0.0/16']
 
-# %% ../nbs/04_network.ipynb #8407f39e
+# %% ../nbs/04_network.ipynb #f5facae5
 def _networks_client(auth):
     return compute_v1.NetworksClient(credentials=auth.credentials)
 
@@ -175,7 +173,7 @@ def delete_subnet(auth, name: str, region: str = None) -> dict:
     wait_op(op, what=f'delete_subnet {name}', timeout=120)
     return {'name': name, 'status': 'deleted'}
 
-# %% ../nbs/04_network.ipynb #4d93f447
+# %% ../nbs/04_network.ipynb #0587fcce
 def _sm(auth):
     return secretmanager_v1.SecretManagerServiceClient(credentials=auth.credentials)
 
@@ -253,7 +251,7 @@ def delete_secret(auth, name: str) -> dict:
         return {'name': full, 'status': 'not_found'}
     return {'name': full, 'status': 'deleted'}
 
-# %% ../nbs/04_network.ipynb #f708edb6
+# %% ../nbs/04_network.ipynb #48a20bb4
 def _iam(auth):
     return googleapiclient.discovery.build('iam', 'v1', credentials=auth.credentials)
 
@@ -317,7 +315,7 @@ def delete_service_account(auth, email: str) -> dict:
         return {'email': email, 'status': 'not_found'}
     return {'email': email, 'status': 'deleted'}
 
-# %% ../nbs/04_network.ipynb #e2aecbb6
+# %% ../nbs/04_network.ipynb #2393158e
 def create_private_service_connect(auth, name: str, network: str, subnet: str,
                                    service_attachment: str, ip_address: str = None,
                                    **_) -> dict:
@@ -343,7 +341,7 @@ def create_private_service_connect(auth, name: str, network: str, subnet: str,
     wait_op(op, what=f'create_private_service_connect {name}', timeout=120)
     return {'name': name}
 
-# %% ../nbs/04_network.ipynb #df393cc5
+# %% ../nbs/04_network.ipynb #e5e70761
 def create_cdn_backend(auth, name: str, bucket_name: str,
                        cdn_policy: dict = None, **_) -> dict:
     """Create a Cloud CDN backend bucket for serving static content."""
@@ -579,7 +577,7 @@ def create_https_lb(auth, name: str, backend_service: str,
 
     return out
 
-# %% ../nbs/04_network.ipynb #7a622cfe
+# %% ../nbs/04_network.ipynb #7d30a64f
 def create_armor_policy(auth, name: str, rules: list = None, **_) -> dict:
     """Create a Cloud Armor security policy."""
     compute = googleapiclient.discovery.build(
@@ -659,7 +657,7 @@ def wait_managed_cert_active(auth, name: str, timeout: int = 1800,
         _log(f'managed_cert {name}: {status} domains={domain_status}')
         time.sleep(poll)
 
-# %% ../nbs/04_network.ipynb #a1289185
+# %% ../nbs/04_network.ipynb #b91762fb
 def get_or_create_oauth_brand(auth, support_email: str,
                               application_title: str = None) -> dict:
     """Return the project OAuth brand (the IAP "consent screen"), creating it
@@ -715,7 +713,7 @@ def get_oidc_token(auth, target_audience: str) -> str:
     from google.oauth2 import id_token as _id_token
     return _id_token.fetch_id_token(Request(), target_audience)
 
-# %% ../nbs/04_network.ipynb #67cb2972
+# %% ../nbs/04_network.ipynb #64b8b591
 def create_vpc_sc_perimeter(auth, policy_resource: str, perimeter_name: str,
                             restricted_services: list = None,
                             access_levels: list = None, **_) -> dict:
@@ -757,7 +755,7 @@ def create_vpc_sc_perimeter(auth, policy_resource: str, perimeter_name: str,
                      timeout=120)
     return {'name': result.name, 'title': perimeter_name}
 
-# %% ../nbs/04_network.ipynb #24683512
+# %% ../nbs/04_network.ipynb #cf0a295d
 def create_dns_zone(auth, zone_name: str, dns_name: str,
                     description: str = '', **_) -> dict:
     """Create a public Cloud DNS managed zone.  Idempotent.
