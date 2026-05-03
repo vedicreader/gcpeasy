@@ -6,7 +6,7 @@
 __all__ = ['HIPAA', 'ISO27001', 'SOC2', 'REQUIRED_APIS', 'GENAI_APIS', 'DEFAULT_AUDIT_SERVICES', 'GCPAuth', 'label_resources',
            'list_labeled_resources', 'enable_data_access_audit', 'enable_apis', 'preflight', 'GenAIStack']
 
-# %% ../nbs/00_core.ipynb #f0d0963b
+# %% ../nbs/00_core.ipynb #b02cdf12
 import os
 from fastcore.basics import store_attr
 
@@ -20,7 +20,7 @@ try:
 except ImportError:
     pass  # optional at import time; raised at runtime if needed
 
-# %% ../nbs/00_core.ipynb #ef3b972d
+# %% ../nbs/00_core.ipynb #5b7f6af7
 HIPAA = dict(
     encryption=True,
     tls_min='1.2',
@@ -49,7 +49,7 @@ SOC2 = dict(
     labels={'compliance': 'soc2'},
 )
 
-# %% ../nbs/00_core.ipynb #80d487e1
+# %% ../nbs/00_core.ipynb #d2606ff7
 #: Minimal set of APIs needed for VM + Cloud Run + Artifact Registry deploys.
 REQUIRED_APIS = [
     'compute.googleapis.com',
@@ -110,7 +110,7 @@ class GCPAuth:
     def __repr__(self):
         return f'GCPAuth(project={self.project!r}, region={self.region!r})'
 
-# %% ../nbs/00_core.ipynb #bc9f88cb
+# %% ../nbs/00_core.ipynb #8ff769db
 def label_resources(auth, labels: dict) -> list:
     """List GCP project resources matching ``labels`` using Cloud Asset Inventory.
 
@@ -131,7 +131,7 @@ def list_labeled_resources(auth) -> list:
     """List all resources in the project (no label filter)."""
     return label_resources(auth, {})
 
-# %% ../nbs/00_core.ipynb #e7e7f36e
+# %% ../nbs/00_core.ipynb #7bd6dd9f
 #: Sensible default services to enable Data Access audit logs on.  Avoids the
 #: very large log volume (and bill) that ``allServices`` produces for noisy
 #: services like ``compute.googleapis.com``.
@@ -201,7 +201,7 @@ def enable_data_access_audit(auth, service: str = None,
     update_iam_policy(crm, auth.project, _mutate)
     return {'project': auth.project, 'services': statuses}
 
-# %% ../nbs/00_core.ipynb #f3d7d896
+# %% ../nbs/00_core.ipynb #56192ea6
 def enable_apis(auth, apis: list = None, wait: bool = True) -> dict:
     """Enable Google Cloud APIs on the project (idempotent).
 
@@ -318,7 +318,7 @@ def preflight(auth, apis: list = None, require_billing: bool = True) -> dict:
         )
     return out
 
-# %% ../nbs/00_core.ipynb #c0a5748a
+# %% ../nbs/00_core.ipynb #2334ffdc
 class GenAIStack:
     """Provision a full enterprise GenAI stack on GCP in one call."""
 

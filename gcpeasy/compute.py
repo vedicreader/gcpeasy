@@ -9,7 +9,7 @@ __all__ = ['DOCKER_INSTALL_SCRIPT', 'create_instance', 'instance_ip', 'start_ins
            'deploy_cloudrun', 'cloudrun_url', 'delete_cloudrun', 'cloudrun_domain_mapping', 'build_image_cloudbuild',
            'push_image']
 
-# %% ../nbs/03_compute.ipynb #0eb6d897
+# %% ../nbs/03_compute.ipynb #a7aae8a8
 import io
 import os
 import socket
@@ -46,7 +46,7 @@ try:
 except ImportError:
     pass
 
-# %% ../nbs/03_compute.ipynb #f4c2736a
+# %% ../nbs/03_compute.ipynb #c5e650bc
 def _latest_debian_image(auth, zone: str) -> str:
     """Return the latest Debian 12 image selfLink."""
     client = compute_v1.ImagesClient(credentials=auth.credentials)
@@ -221,7 +221,7 @@ def delete_instance(auth, name: str, zone: str = None) -> dict:
     wait_op(op, what=f'delete_instance {name}', timeout=300)
     return {'name': name, 'status': 'deleted'}
 
-# %% ../nbs/03_compute.ipynb #00bc3319
+# %% ../nbs/03_compute.ipynb #60f127b4
 #: Minimal startup script that installs Docker + Compose plugin on Debian 12.
 DOCKER_INSTALL_SCRIPT = r"""#!/usr/bin/env bash
 set -euo pipefail
@@ -319,7 +319,7 @@ def vm_run_compose(auth, name: str, compose_yaml: str,
     script = '\n'.join(parts) + '\n'
     return {'startup_script': script, 'workdir': workdir}
 
-# %% ../nbs/03_compute.ipynb #ce6d2914
+# %% ../nbs/03_compute.ipynb #abf8bd6d
 def create_gke_cluster(auth, name: str, node_count: int = 1,
                        machine_type: str = 'e2-standard-4', autopilot: bool = True,
                        workload_identity: bool = True, labels: dict = None,
@@ -394,7 +394,7 @@ def scale_gke(auth, name: str, node_pool: str, node_count: int):
     )
     return op.name
 
-# %% ../nbs/03_compute.ipynb #f38c1af5
+# %% ../nbs/03_compute.ipynb #ea164239
 def create_artifact_registry(auth, name: str, format: str = 'DOCKER',
                              labels: dict = None, **_) -> dict:
     """Create an Artifact Registry repository.  Vulnerability scanning is enabled."""
@@ -439,7 +439,7 @@ def delete_artifact_registry(auth, name: str) -> dict:
     wait_op(op, what=f'delete_artifact_registry {name}', timeout=120)
     return {'name': full, 'status': 'deleted'}
 
-# %% ../nbs/03_compute.ipynb #11c1f10e
+# %% ../nbs/03_compute.ipynb #866a90d3
 def deploy_cloudrun(
     auth,
     name: str,
@@ -629,7 +629,7 @@ def cloudrun_domain_mapping(auth, service: str, domain: str,
     return {'domain': domain, 'service': service,
             'status': 'created', 'records': records}
 
-# %% ../nbs/03_compute.ipynb #cf009502
+# %% ../nbs/03_compute.ipynb #2f350000
 def _tar_dir(source_dir: str) -> bytes:
     """Tar+gzip a directory in memory, honouring an optional ``.gcloudignore``
     or ``.dockerignore`` (very small subset: line-prefix glob-style)."""

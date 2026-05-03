@@ -6,7 +6,7 @@
 __all__ = ['cmd_preflight', 'cmd_enable_apis', 'cmd_vm_create', 'cmd_vm_deploy', 'cmd_run_deploy', 'cmd_stack_provision',
            'cmd_stack_destroy', 'build_parser', 'main']
 
-# %% ../nbs/05_cli.ipynb #293ed39d
+# %% ../nbs/05_cli.ipynb #a3184a7a
 import argparse
 import json
 import os
@@ -28,7 +28,7 @@ def _print(obj: Any) -> None:
     else:
         print(obj)
 
-# %% ../nbs/05_cli.ipynb #89a5ac36
+# %% ../nbs/05_cli.ipynb #a28df054
 def cmd_preflight(args) -> int:
     from .core import preflight, GENAI_APIS, REQUIRED_APIS
     auth = _auth(args)
@@ -189,7 +189,7 @@ def cmd_stack_destroy(args) -> int:
     _print(stack.destroy())
     return 0
 
-# %% ../nbs/05_cli.ipynb #e5f8f09a
+# %% ../nbs/05_cli.ipynb #fb15a168
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='gcpeasy', description='gcpeasy CLI')
     p.add_argument('--project', help='GCP project ID (defaults to GOOGLE_CLOUD_PROJECT)')
@@ -280,7 +280,7 @@ def main(argv: list = None) -> int:
     args = build_parser().parse_args(argv)
     return args.func(args)
 
-# %% ../nbs/05_cli.ipynb #2b3b2d62
+# %% ../nbs/05_cli.ipynb #6013dec7
 #| eval: false
 if __name__ == '__main__':  # pragma: no cover
     sys.exit(main())

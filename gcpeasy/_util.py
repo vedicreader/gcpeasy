@@ -6,13 +6,13 @@
 __all__ = ['wait_op', 'wait_rest_op', 'GcpEasyError', 'translate_error', 'with_translation', 'update_iam_policy', 'labels_merge',
            'chunked']
 
-# %% ../nbs/00a_util.ipynb #d8cd064f
+# %% ../nbs/00a_util.ipynb #9187c88a
 import os
 import sys
 import time
 from typing import Any, Callable, Iterable
 
-# %% ../nbs/00a_util.ipynb #b6ac6c26
+# %% ../nbs/00a_util.ipynb #d62ff593
 def _log(msg: str) -> None:
     """Emit a single-line progress message to stderr (suppressible via env)."""
     if os.environ.get('GCPEASY_QUIET'):
@@ -74,7 +74,7 @@ def wait_rest_op(compute, project: str, op: dict, what: str, timeout: int = 600,
             _log(f'{what}: {done.get("status", "PENDING")} ({int(time.monotonic() - start)}s)')
         time.sleep(5)
 
-# %% ../nbs/00a_util.ipynb #073bce5d
+# %% ../nbs/00a_util.ipynb #b53ed33e
 _REMEDIATION = {
     'SERVICE_DISABLED':
         'Run `gcpeasy enable-apis` (or call gcpeasy.core.enable_apis) for this project.',
@@ -111,7 +111,7 @@ def with_translation(fn: Callable, what: str = '') -> Callable:
             raise translated from e
     return _wrap
 
-# %% ../nbs/00a_util.ipynb #b4040b55
+# %% ../nbs/00a_util.ipynb #539b815d
 def update_iam_policy(crm, resource: str, mutate: Callable[[dict], bool],
                       max_retries: int = 3) -> dict:
     """Read project IAM policy v3 (with etag), apply ``mutate``, write back.
@@ -144,7 +144,7 @@ def update_iam_policy(crm, resource: str, mutate: Callable[[dict], bool],
         raise last_exc  # pragma: no cover
     return {}
 
-# %% ../nbs/00a_util.ipynb #fb40e6d2
+# %% ../nbs/00a_util.ipynb #37a275d2
 def labels_merge(*sources: dict) -> dict:
     """Merge label dicts, later sources winning; drops ``None``/empty values."""
     out: dict = {}

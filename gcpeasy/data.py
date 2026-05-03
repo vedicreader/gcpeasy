@@ -7,7 +7,7 @@ __all__ = ['create_bucket', 'bucket_url', 'signed_url', 'bucket_conn', 'delete_b
            'create_postgres', 'postgres_conn', 'create_database', 'create_db_user', 'delete_postgres', 'create_redis',
            'redis_conn', 'delete_redis']
 
-# %% ../nbs/02_data.ipynb #b75faf07
+# %% ../nbs/02_data.ipynb #0846e8b6
 import datetime
 import secrets as _sec
 import time
@@ -31,7 +31,7 @@ try:
 except ImportError:
     pass
 
-# %% ../nbs/02_data.ipynb #0007068a
+# %% ../nbs/02_data.ipynb #e896e686
 def _gcs(auth):
     return storage.Client(project=auth.project, credentials=auth.credentials)
 
@@ -124,7 +124,7 @@ def delete_bucket(auth, name: str, force: bool = True) -> dict:
     bucket.delete(force=False)
     return {'name': name, 'status': 'deleted'}
 
-# %% ../nbs/02_data.ipynb #1a4b8e9a
+# %% ../nbs/02_data.ipynb #4b59a090
 def _firestore(auth):
     return fs.Client(project=auth.project, credentials=auth.credentials)
 
@@ -147,7 +147,7 @@ def firestore_conn(auth) -> str:
     "Return a firestore:// URI for the project database."
     return f'firestore://{auth.project}/(default)'
 
-# %% ../nbs/02_data.ipynb #68bfcb92
+# %% ../nbs/02_data.ipynb #1bb6639f
 def _sqladmin(auth):
     return googleapiclient.discovery.build(
         'sqladmin', 'v1beta4', credentials=auth.credentials,
@@ -341,7 +341,7 @@ def delete_postgres(auth, name: str, wait: bool = True) -> dict:
                      what=f'delete_postgres {name}', timeout=900)
     return {'name': name, 'status': 'deleted'}
 
-# %% ../nbs/02_data.ipynb #8ff05bdd
+# %% ../nbs/02_data.ipynb #6906988d
 def create_redis(auth, name: str, tier: str = 'BASIC', memory_size_gb: int = 1,
                  redis_version: str = 'REDIS_7_0',
                  transit_encryption: bool = True,
