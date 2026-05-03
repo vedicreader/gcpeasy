@@ -31,12 +31,17 @@ dependencies = [
     "google-cloud-secret-manager>=2.20",
     "google-cloud-resource-manager>=1.12",
     "google-cloud-run>=0.10",
+    "google-cloud-build>=3.20",
+    "google-cloud-dns>=0.35",
     "google-cloud-access-context-manager>=0.3",
 ]
 
 [project.urls]
 Repository = "https://github.com/vedicreader/gcpeasy"
 Documentation = "https://vedicreader.github.io/gcpeasy/"
+
+[project.scripts]
+gcpeasy = "gcpeasy.cli:main"
 
 [project.entry-points.nbdev]
 gcpeasy = "gcpeasy._modidx:d"

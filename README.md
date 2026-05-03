@@ -8,6 +8,33 @@
 pip install gcpeasy
 ```
 
+## CLI quickstart
+
+`gcpeasy` ships a small CLI that mirrors the library surface — designed to
+be the layer that ecosystem tools like `vr-deploy gcp-vm` /
+`vr-deploy gcp-cloudrun` shell out to:
+
+```sh
+# Verify ADC, billing, required APIs
+gcpeasy preflight
+
+# Idempotently enable the APIs gcpeasy needs
+gcpeasy enable-apis
+
+# One-shot VM deploy of a docker-compose stack
+gcpeasy vm deploy myapp --create --compose docker-compose.yml --env .env
+
+# Build via Cloud Build then deploy to Cloud Run
+gcpeasy run deploy myapp --source . \
+  --image us-central1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/repo/myapp:latest \
+  --secret DB_PASS=projects/$GOOGLE_CLOUD_PROJECT/secrets/db-pass/versions/latest \
+  --env LOG_LEVEL=info --cpu 2 --memory 1Gi
+
+# Provision / destroy a full GenAI stack
+gcpeasy stack provision myapp --profile hipaa
+gcpeasy stack destroy myapp --resources resources.json
+```
+
 ## Overview
 
 `gcpeasy` is the GCP member of the `vedicreader` cloud tool ecosystem:
@@ -189,22 +216,33 @@ uri = redis_conn(auth, 'app-cache')  # redis://host:port
 ```python
 from gcpeasy.compute import (
     create_instance, instance_ip,
+    wait_for_ssh, vm_install_docker, vm_run_compose,
     create_gke_cluster, gke_kubeconfig,
     create_artifact_registry, registry_url,
+    build_image_cloudbuild,
 )
 
-# Shielded VM (secure boot + vTPM + integrity monitoring on by default)
-vm = create_instance(auth, 'ml-worker', machine_type='n2-standard-4')
-print(instance_ip(auth, 'ml-worker'))
+# Shielded VM with OS Login + Docker preinstalled, reachable on a public IP
+vm = create_instance(auth, 'ml-worker', machine_type='n2-standard-4',
+                     startup_script=vm_install_docker(auth))
+print(vm['external_ip'])
+wait_for_ssh(auth, 'ml-worker')   # blocks until SSH is reachable
+
+# One-shot docker-compose deploy via the VM startup script
+bundle = vm_run_compose(auth, 'web',
+    compose_yaml=open('docker-compose.yml').read(),
+    env={'LOG_LEVEL': 'info'})
+create_instance(auth, 'web', startup_script=bundle['startup_script'])
 
 # GKE Autopilot cluster with Workload Identity
 cluster = create_gke_cluster(auth, 'prod-cluster', autopilot=True)
 kubeconfig = gke_kubeconfig(auth, 'prod-cluster')
 
-# Artifact Registry Docker repo
+# Artifact Registry Docker repo + server-side Cloud Build
 repo = create_artifact_registry(auth, 'app-images')
-print(registry_url(auth, 'app-images'))
-# us-central1-docker.pkg.dev/my-project-id/app-images
+image = registry_url(auth, 'app-images') + '/api:latest'
+build = build_image_cloudbuild(auth, source_dir='.', image=image)
+print(build['image_digest'])
 ```
 
 ## VPC, Secret Manager, IAM, Load Balancer
@@ -221,7 +259,10 @@ from gcpeasy.network import (
 vpc = create_vpc(auth, 'app-vpc')
 subnet = add_subnet(auth, 'app-vpc', 'app-subnet', cidr='10.10.0.0/24')
 create_firewall_rule(auth, 'allow-https', 'app-vpc',
-                     protocol='tcp', ports=['443'])
+                     protocol='tcp', ports=['443'],
+                     source_ranges=['0.0.0.0/0'])  # explicit; default is now safe
+# IAP-tunneled SSH (no public 22):
+create_firewall_rule(auth, 'iap-ssh', 'app-vpc', iap_ssh=True)
 
 # Secret Manager
 create_secret(auth, 'app/db-password', 'my-secure-password')
